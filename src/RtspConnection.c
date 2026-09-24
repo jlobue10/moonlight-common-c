@@ -1092,7 +1092,14 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_PYROWAVE) &&
                 (serverInfo->serverCodecModeSupport & SCM_PYROWAVE) &&
                 strstr(response.payload, "PYROWAVE/90000")) {
-            NegotiatedVideoFormat = VIDEO_FORMAT_PYROWAVE;
+            // Full-resolution chroma when the client asked for it and the server can do it.
+            if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_PYROWAVE_444) &&
+                    (serverInfo->serverCodecModeSupport & SCM_PYROWAVE_444)) {
+                NegotiatedVideoFormat = VIDEO_FORMAT_PYROWAVE_444;
+            }
+            else {
+                NegotiatedVideoFormat = VIDEO_FORMAT_PYROWAVE;
+            }
         }
         else if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1) && strstr(response.payload, "AV1/90000")) {
             if ((serverInfo->serverCodecModeSupport & SCM_AV1_HIGH10_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH10_444)) {
