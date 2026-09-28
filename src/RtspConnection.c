@@ -1100,6 +1100,12 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             else {
                 NegotiatedVideoFormat = VIDEO_FORMAT_PYROWAVE;
             }
+
+            // Carry the client's HDR intent through, since it doesn't map to a
+            // distinct selectable format the way it does for HEVC/AV1 above.
+            if (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_PYROWAVE_HDR10) {
+                NegotiatedVideoFormat |= VIDEO_FORMAT_PYROWAVE_HDR10;
+            }
         }
         else if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1) && strstr(response.payload, "AV1/90000")) {
             if ((serverInfo->serverCodecModeSupport & SCM_AV1_HIGH10_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH10_444)) {

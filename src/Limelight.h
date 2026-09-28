@@ -234,6 +234,13 @@ typedef struct _DECODE_UNIT {
 #define VIDEO_FORMAT_AV1_HIGH10_444  0x8000 // AV1 High 4:4:4 10-bit profile
 #define VIDEO_FORMAT_PYROWAVE        0x10000 // PyroWave intra-only wavelet profile (Moonlight extension)
 #define VIDEO_FORMAT_PYROWAVE_444    0x20000 // PyroWave with full-resolution chroma (Moonlight extension)
+// Not a selectable codec profile on its own - OR it alongside VIDEO_FORMAT_PYROWAVE(_444)
+// in supportedVideoFormats to ask for HDR. PyroWave signals HDR-ness per-frame over its own
+// wire container rather than via a distinct 10-bit format constant, so this bit exists only
+// to carry that intent through RTSP negotiation into the dynamicRangeMode SDP attribute
+// (see RtspConnection.c/SdpGenerator.c) - without it, the host has no way to know PyroWave
+// streams should be encoded as HDR10 and silently falls back to SDR.
+#define VIDEO_FORMAT_PYROWAVE_HDR10  0x40000
 
 // Masks for clients to use to match video codecs without profile-specific details.
 #define VIDEO_FORMAT_MASK_H264   0x000F
