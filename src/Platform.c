@@ -2,6 +2,7 @@
 #include "Limelight-internal.h"
 #if defined(__vita__)
 #include <pthread.h>
+#include <psp2/kernel/processmgr.h>
 #endif
 
 // The maximum amount of time before observing an interrupt
@@ -19,7 +20,7 @@ static int activeMutexes = 0;
 static int activeEvents = 0;
 static int activeCondVars = 0;
 
-#if defined(LC_WINDOWS)
+#if defined(LC_WINDOWS) && !defined(NXDK)
 
 #pragma pack(push, 8)
 typedef struct tagTHREADNAME_INFO
@@ -64,18 +65,23 @@ void setThreadNameWin32(const char* name) {
     }
 #endif
 }
+#endif
 
+#if defined(LC_WINDOWS)
 DWORD WINAPI ThreadProc(LPVOID lpParameter) {
     struct thread_context* ctx = (struct thread_context*)lpParameter;
 #elif defined(__WIIU__)
 int ThreadProc(int argc, const char** argv) {
     struct thread_context* ctx = (struct thread_context*)argv;
+#elif defined (__3DS__)
+void ThreadProc(void* context) {
+    struct thread_context* ctx = (struct thread_context*)context;
 #else
 void* ThreadProc(void* context) {
     struct thread_context* ctx = (struct thread_context*)context;
 #endif
 
-#if defined(LC_WINDOWS)
+#if defined(LC_WINDOWS) && !defined(NXDK)
     setThreadNameWin32(ctx->name);
 #elif defined(__linux__) || defined(__FreeBSD__)
     pthread_setname_np(pthread_self(), ctx->name);
@@ -85,12 +91,12 @@ void* ThreadProc(void* context) {
 
     ctx->entry(ctx->context);
 
-#if defined(__vita__)
-free(ctx);
-#endif
+    free(ctx);
 
-#if defined(LC_WINDOWS) || defined(__vita__) || defined(__WIIU__) || defined(__3DS__)
+#if defined(LC_WINDOWS) || defined(__vita__) || defined(__WIIU__)
     return 0;
+#elif defined(__3DS__)
+    return;
 #else
     return NULL;
 #endif
@@ -287,16 +293,19 @@ int PltCreateThread(const char* name, ThreadEntry entry, void* context, PLT_THRE
 
         pthread_attr_init(&attr);
 
+#ifdef __vita__
         pthread_attr_setstacksize(&attr, 0x100000);
+#endif
 
         ctx->name = name;
 
         int err = pthread_create(&thread->thread, &attr, ThreadProc, ctx);
+        pthread_attr_destroy(&attr);
         if (err != 0) {
             free(ctx);
             return err;
         }
-        
+
     }
 #endif
 
@@ -307,7 +316,7 @@ int PltCreateThread(const char* name, ThreadEntry entry, void* context, PLT_THRE
 
 int PltCreateEvent(PLT_EVENT* event) {
 #if defined(LC_WINDOWS)
-    *event = CreateEventEx(NULL, NULL, CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS);
+    *event = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!*event) {
         return -1;
     }
@@ -419,23 +428,153 @@ void PltWaitForConditionVariable(PLT_COND* cond, PLT_MUTEX* mutex) {
 #endif
 }
 
-uint64_t PltGetMillis(void) {
+//// Begin timing functions
+
+// These functions return a number of microseconds or milliseconds since an opaque start time.
+
+static bool ticks_started = false;
+
 #if defined(LC_WINDOWS)
-    return GetTickCount64();
-#elif defined(CLOCK_MONOTONIC) && !defined(NO_CLOCK_GETTIME)
-    struct timespec tv;
 
-    clock_gettime(CLOCK_MONOTONIC, &tv);
+static LARGE_INTEGER start_ticks;
+static LARGE_INTEGER ticks_per_second;
 
-    return ((uint64_t)tv.tv_sec * 1000) + (tv.tv_nsec / 1000000);
-#else
-    struct timeval tv;
-
-    gettimeofday(&tv, NULL);
-
-    return ((uint64_t)tv.tv_sec * 1000) + (tv.tv_usec / 1000);
-#endif
+void PltTicksInit(void) {
+    if (ticks_started) {
+        return;
+    }
+    ticks_started = true;
+    QueryPerformanceFrequency(&ticks_per_second);
+    QueryPerformanceCounter(&start_ticks);
 }
+
+uint64_t PltGetMicroseconds(void) {
+    if (!ticks_started) {
+        PltTicksInit();
+    }
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return (uint64_t)(((now.QuadPart - start_ticks.QuadPart) * 1000000) / ticks_per_second.QuadPart);
+}
+
+#elif defined(LC_DARWIN)
+
+static uint64_t start_ns;
+
+void PltTicksInit(void) {
+    if (ticks_started) {
+        return;
+    }
+    ticks_started = true;
+    start_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+}
+
+uint64_t PltGetMicroseconds(void) {
+    if (!ticks_started) {
+        PltTicksInit();
+    }
+    const uint64_t now_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    return (now_ns - start_ns) / 1000;
+}
+
+#elif defined(__vita__)
+
+static uint64_t start;
+
+void PltTicksInit(void) {
+    if (ticks_started) {
+        return;
+    }
+    ticks_started = true;
+    start = sceKernelGetProcessTimeWide();
+}
+
+uint64_t PltGetMicroseconds(void) {
+    if (!ticks_started) {
+        PltTicksInit();
+    }
+    uint64_t now = sceKernelGetProcessTimeWide();
+    return (uint64_t)(now - start);
+}
+
+#elif defined(__3DS__)
+
+static uint64_t start;
+
+void PltTicksInit(void) {
+    if (ticks_started) {
+        return;
+    }
+    ticks_started = true;
+    start = svcGetSystemTick();
+}
+
+uint64_t PltGetMicroseconds(void) {
+    if (!ticks_started) {
+        PltTicksInit();
+    }
+    uint64_t elapsed = svcGetSystemTick() - start;
+    return elapsed * 1000 / CPU_TICKS_PER_MSEC;
+}
+
+#else
+
+/* Use CLOCK_MONOTONIC_RAW, if available, which is not subject to adjustment by NTP */
+#ifdef HAVE_CLOCK_GETTIME
+static struct timespec start_ts;
+# ifdef CLOCK_MONOTONIC_RAW
+#  define PLT_MONOTONIC_CLOCK CLOCK_MONOTONIC_RAW
+# else
+#  define PLT_MONOTONIC_CLOCK CLOCK_MONOTONIC
+# endif
+#endif
+
+static bool has_monotonic_time = false;
+static struct timeval start_tv;
+
+void PltTicksInit(void) {
+    if (ticks_started) {
+        return;
+    }
+    ticks_started = true;
+#ifdef HAVE_CLOCK_GETTIME
+    if (clock_gettime(PLT_MONOTONIC_CLOCK, &start_ts) == 0) {
+        has_monotonic_time = true;
+    } else
+#endif
+    {
+        gettimeofday(&start_tv, NULL);
+    }
+}
+
+uint64_t PltGetMicroseconds(void) {
+    if (!ticks_started) {
+        PltTicksInit();
+    }
+
+    if (has_monotonic_time) {
+#ifdef HAVE_CLOCK_GETTIME
+        struct timespec now;
+        clock_gettime(PLT_MONOTONIC_CLOCK, &now);
+        return (uint64_t)(((int64_t)(now.tv_sec - start_ts.tv_sec) * 1000000) + ((now.tv_nsec - start_ts.tv_nsec) / 1000));
+#else
+        LC_ASSERT(false);
+        return 0;
+#endif
+    } else {
+        struct timeval now;
+        gettimeofday(&now, NULL);
+        return (uint64_t)(((int64_t)(now.tv_sec - start_tv.tv_sec) * 1000000) + (now.tv_usec - start_tv.tv_usec));
+    }
+}
+
+#endif
+
+uint64_t PltGetMillis(void) {
+    return PltGetMicroseconds() / 1000;
+}
+
+//// End timing functions
 
 bool PltSafeStrcpy(char* dest, size_t dest_size, const char* src) {
     LC_ASSERT(dest_size > 0);
@@ -446,7 +585,7 @@ bool PltSafeStrcpy(char* dest, size_t dest_size, const char* src) {
     memset(dest, 0xFE, dest_size);
 #endif
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && !defined(NXDK)
     // strncpy_s() with _TRUNCATE does what we need for MSVC.
     // We use this rather than strcpy_s() because we don't want
     // the invalid parameter handler invoked upon failure.
@@ -473,6 +612,8 @@ bool PltSafeStrcpy(char* dest, size_t dest_size, const char* src) {
 
 int initializePlatform(void) {
     int err;
+
+    PltTicksInit();
 
     err = initializePlatformSockets();
     if (err != 0) {

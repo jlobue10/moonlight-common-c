@@ -4,6 +4,7 @@
 #define RTSP_CONNECT_TIMEOUT_SEC 10
 #define RTSP_RECEIVE_TIMEOUT_SEC 15
 #define RTSP_RETRY_DELAY_MS 500
+#define MAX_RTSP_RESPONSE_SIZE (1024 * 1024)
 
 static int currentSeqNumber;
 static char rtspTargetUrl[256];
@@ -267,19 +268,19 @@ static bool transactRtspMessageEnet(PRTSP_MESSAGE request, PRTSP_MESSAGE respons
     payloadLength = request->payloadLength;
     request->payload = NULL;
     request->payloadLength = 0;
-    
+
     // Serialize the RTSP message into a message buffer
     serializedMessage = serializeRtspMessage(request, &messageLen);
     if (serializedMessage == NULL) {
         goto Exit;
     }
-    
+
     // Create the reliable packet that describes our outgoing message
     packet = enet_packet_create(serializedMessage, messageLen, ENET_PACKET_FLAG_RELIABLE);
     if (packet == NULL) {
         goto Exit;
     }
-    
+
     // Send the message
     if (enet_peer_send(peer, 0, packet) < 0) {
         enet_packet_destroy(packet);
@@ -299,14 +300,20 @@ static bool transactRtspMessageEnet(PRTSP_MESSAGE request, PRTSP_MESSAGE respons
             enet_packet_destroy(packet);
             goto Exit;
         }
-        
+
         enet_host_flush(client);
     }
-    
+
     // Wait for a reply
     if (serviceEnetHost(client, &event, RTSP_RECEIVE_TIMEOUT_SEC * 1000) <= 0 ||
         event.type != ENET_EVENT_TYPE_RECEIVE) {
         Limelog("Failed to receive RTSP reply: %d\n", LastSocketFail());
+        goto Exit;
+    }
+
+    if (event.packet->dataLength > MAX_RTSP_RESPONSE_SIZE) {
+        Limelog("RTSP response exceeded maximum allowed size\n");
+        enet_packet_destroy(event.packet);
         goto Exit;
     }
 
@@ -331,6 +338,12 @@ static bool transactRtspMessageEnet(PRTSP_MESSAGE request, PRTSP_MESSAGE respons
             goto Exit;
         }
 
+        if ((size_t)offset + event.packet->dataLength > MAX_RTSP_RESPONSE_SIZE) {
+            Limelog("RTSP response exceeded maximum allowed size\n");
+            enet_packet_destroy(event.packet);
+            goto Exit;
+        }
+
         responseBuffer = extendBuffer(responseBuffer, event.packet->dataLength + offset);
         if (responseBuffer == NULL) {
             Limelog("Failed to extend RTSP response buffer\n");
@@ -343,7 +356,7 @@ static bool transactRtspMessageEnet(PRTSP_MESSAGE request, PRTSP_MESSAGE respons
         offset += (int) event.packet->dataLength;
         enet_packet_destroy(event.packet);
     }
-        
+
     if (parseRtspMessage(response, responseBuffer, offset) == RTSP_ERROR_SUCCESS) {
         // Successfully parsed response
         ret = true;
@@ -436,7 +449,14 @@ static bool transactRtspMessageTcp(PRTSP_MESSAGE request, PRTSP_MESSAGE response
         struct pollfd pfd;
 
         if (offset >= responseBufferSize) {
+            if ((size_t)offset >= MAX_RTSP_RESPONSE_SIZE) {
+                *error = EMSGSIZE;
+                Limelog("RTSP response exceeded maximum allowed size\n");
+                goto Exit;
+            }
+      
             responseBufferSize = offset + 16384;
+      
             responseBuffer = extendBuffer(responseBuffer, responseBufferSize);
             if (responseBuffer == NULL) {
                 Limelog("Failed to allocate RTSP response buffer\n");
@@ -470,24 +490,18 @@ static bool transactRtspMessageTcp(PRTSP_MESSAGE request, PRTSP_MESSAGE response
             break;
         }
         else {
+            if ((size_t)offset + err > MAX_RTSP_RESPONSE_SIZE) {
+                *error = EMSGSIZE;
+                Limelog("RTSP response exceeded maximum allowed size\n");
+                goto Exit;
+            }
+      
             offset += err;
         }
     }
 
     // Decrypt (if necessary) and deserialize the RTSP response
     ret = unsealRtspMessage(responseBuffer, offset, response);
-
-    // Fetch the local address for this socket if it's not populated yet
-    if (LocalAddr.ss_family == 0) {
-        SOCKADDR_LEN addrLen = (SOCKADDR_LEN)sizeof(LocalAddr);
-        if (getsockname(sock, (struct sockaddr*)&LocalAddr, &addrLen) < 0) {
-            Limelog("Failed to get local address: %d\n", LastSocketError());
-            memset(&LocalAddr, 0, sizeof(LocalAddr));
-        }
-        else {
-            LC_ASSERT(addrLen == AddrLen);
-        }
-    }
 
 Exit:
     if (serializedMessage != NULL) {
@@ -583,7 +597,7 @@ static bool setupStream(PRTSP_MESSAGE response, char* target, int* error) {
         else {
             transportValue = " ";
         }
-        
+
         if (addOption(&request, "Transport", transportValue) &&
             addOption(&request, "If-Modified-Since",
                 "Thu, 01 Jan 1970 00:00:00 GMT")) {
@@ -888,7 +902,7 @@ static bool parseUrlAddrFromRtspUrlString(const char* rtspUrlString, char* desti
 
 // SDP attributes are in the form:
 // a=x-nv-bwe.bwuSafeZoneLowLimit:70\r\n
-bool parseSdpAttributeToUInt(const char* payload, const char* name, unsigned int* val) {
+bool parseSdpAttributeToUInt(const char* payload, const char* name, uint32_t* val) {
     // Find the entry for the specified attribute name
     char* attribute = strstr(payload, name);
     if (!attribute) {
@@ -992,21 +1006,21 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             rtspClientVersion = 14;
             break;
     }
-    
+
     // Setup ENet if required by this GFE version
     if (useEnet) {
         ENetAddress address;
         ENetEvent event;
-        
+
         enet_address_set_address(&address, (struct sockaddr *)&RemoteAddr, AddrLen);
         enet_address_set_port(&address, RtspPortNumber);
-        
+
         // Create a client that can use 1 outgoing connection and 1 channel
         client = enet_host_create(RemoteAddr.ss_family, NULL, 1, 1, 0, 0);
         if (client == NULL) {
             return -1;
         }
-    
+
         // Connect to the host
         peer = enet_host_connect(client, &address, 1, 0);
         if (peer == NULL) {
@@ -1014,7 +1028,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             client = NULL;
             return -1;
         }
-    
+
         // Wait for the connect to complete
         if (serviceEnetHost(client, &event, RTSP_CONNECT_TIMEOUT_SEC * 1000) <= 0 ||
             event.type != ENET_EVENT_TYPE_CONNECT) {
@@ -1072,7 +1086,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             ret = -1;
             goto Exit;
         }
-        
+
         if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1) && strstr(response.payload, "AV1/90000")) {
             if ((serverInfo->serverCodecModeSupport & SCM_AV1_HIGH10_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH10_444)) {
                 NegotiatedVideoFormat = VIDEO_FORMAT_AV1_HIGH10_444;
@@ -1154,6 +1168,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         RTSP_MESSAGE response;
         char* sessionId;
         char* pingPayload;
+        char* sessionToken;
         int error = -1;
         char* strtokCtx = NULL;
 
@@ -1205,16 +1220,24 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         }
 
         // Given there is a non-null session id, get the
-        // first token of the session until ";", which 
+        // first token of the session until ";", which
         // resolves any 454 session not found errors on
         // standard RTSP server implementations.
-        // (i.e - sessionId = "DEADBEEFCAFE;timeout = 90") 
-        sessionIdString = strdup(strtok_r(sessionId, ";", &strtokCtx));
+        // (i.e - sessionId = "DEADBEEFCAFE;timeout = 90")
+        sessionToken = strtok_r(sessionId, ";", &strtokCtx);
+        if (sessionToken == NULL || sessionToken[0] == '\0') {
+            Limelog("RTSP SETUP streamid=audio has malformed session attribute\n");
+            ret = -1;
+            goto Exit;
+        }
+      
+        sessionIdString = strdup(sessionToken);
         if (sessionIdString == NULL) {
             Limelog("Failed to duplicate session ID string\n");
             ret = -1;
             goto Exit;
         }
+      
 
         hasSessionId = true;
 
@@ -1262,7 +1285,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
 
         freeMessage(&response);
     }
-    
+
     if (AppVersionQuad[0] >= 5) {
         RTSP_MESSAGE response;
         int error = -1;
@@ -1389,9 +1412,9 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         }
     }
 
-    
+
     ret = 0;
-    
+
 Exit:
     // Cleanup the ENet stuff
     if (useEnet) {
@@ -1399,7 +1422,7 @@ Exit:
             enet_peer_disconnect_now(peer, 0);
             peer = NULL;
         }
-        
+
         if (client != NULL) {
             enet_host_destroy(client);
             client = NULL;
