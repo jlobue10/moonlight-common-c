@@ -32,7 +32,8 @@ static bool receivedFullFrame;
 // much kernel memory with larger packet sizes. It also
 // can smooth over transient pauses in network traffic
 // and subsequent packet/frame bursts that follow.
-#define RTP_RECV_PACKETS_BUFFERED 2048
+// Sized for high-bitrate intra-only codecs such as PyroWave (~11 MB at 1392-byte packets).
+#define RTP_RECV_PACKETS_BUFFERED 8192
 
 // Initialize the video stream
 void initializeVideoStream(void) {
