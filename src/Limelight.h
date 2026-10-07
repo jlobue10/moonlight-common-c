@@ -232,23 +232,23 @@ typedef struct _DECODE_UNIT {
 #define VIDEO_FORMAT_AV1_MAIN10      0x2000 // AV1 Main 10-bit profile
 #define VIDEO_FORMAT_AV1_HIGH8_444   0x4000 // AV1 High 4:4:4 8-bit profile
 #define VIDEO_FORMAT_AV1_HIGH10_444  0x8000 // AV1 High 4:4:4 10-bit profile
-#define VIDEO_FORMAT_PYROWAVE        0x10000 // PyroWave intra-only wavelet profile (Moonlight extension)
-#define VIDEO_FORMAT_PYROWAVE_444    0x20000 // PyroWave with full-resolution chroma (Moonlight extension)
-// Not a selectable codec profile on its own - OR it alongside VIDEO_FORMAT_PYROWAVE(_444)
-// in supportedVideoFormats to ask for HDR. PyroWave signals HDR-ness per-frame over its own
-// wire container rather than via a distinct 10-bit format constant, so this bit exists only
-// to carry that intent through RTSP negotiation into the dynamicRangeMode SDP attribute
-// (see RtspConnection.c/SdpGenerator.c) - without it, the host has no way to know PyroWave
-// streams should be encoded as HDR10 and silently falls back to SDR.
-#define VIDEO_FORMAT_PYROWAVE_HDR10  0x40000
+// PyroWave profiles (Moonlight extension; Vibepollo docs/pyrowave-protocol.md). The bitstream
+// carries no bit depth: the client sizes its planes from the profile it negotiated, so the
+// 10-bit profiles are distinct formats like HEVC Main10 / AV1 Main10. A 10-bit profile means
+// "dynamicRangeMode=1": HDR10 (BT.2020 PQ) when the host display is HDR, 10-bit SDR otherwise;
+// the host's HDR mode control message tells the client which (as for HEVC/AV1).
+#define VIDEO_FORMAT_PYROWAVE           0x10000 // PyroWave 8-bit 4:2:0
+#define VIDEO_FORMAT_PYROWAVE_444       0x20000 // PyroWave 8-bit 4:4:4
+#define VIDEO_FORMAT_PYROWAVE_HDR10     0x40000 // PyroWave 10-bit 4:2:0 (HDR10 on an HDR display)
+#define VIDEO_FORMAT_PYROWAVE_HDR10_444 0x80000 // PyroWave 10-bit 4:4:4
 
 // Masks for clients to use to match video codecs without profile-specific details.
 #define VIDEO_FORMAT_MASK_H264   0x000F
 #define VIDEO_FORMAT_MASK_H265   0x0F00
 #define VIDEO_FORMAT_MASK_AV1    0xF000
-#define VIDEO_FORMAT_MASK_PYROWAVE (VIDEO_FORMAT_PYROWAVE | VIDEO_FORMAT_PYROWAVE_444)
-#define VIDEO_FORMAT_MASK_10BIT  0xAA00
-#define VIDEO_FORMAT_MASK_YUV444 0x2CC04
+#define VIDEO_FORMAT_MASK_PYROWAVE 0xF0000
+#define VIDEO_FORMAT_MASK_10BIT  0xCAA00 // includes the two 10-bit PyroWave profiles
+#define VIDEO_FORMAT_MASK_YUV444 0xACC04 // includes the two 4:4:4 PyroWave profiles
 
 // If set in the renderer capabilities field, this flag will cause audio/video data to
 // be submitted directly from the receive thread. This should only be specified if the
@@ -523,16 +523,18 @@ void LiInitializeConnectionCallbacks(PCONNECTION_LISTENER_CALLBACKS clCallbacks)
 #define SCM_HEVC_REXT10_444 0x00100000 // Sunshine extension
 #define SCM_AV1_HIGH8_444   0x00200000 // Sunshine extension
 #define SCM_AV1_HIGH10_444  0x00400000 // Sunshine extension
-#define SCM_PYROWAVE        0x00800000 // PyroWave extension
-#define SCM_PYROWAVE_444    0x01000000 // PyroWave 4:4:4 extension
+#define SCM_PYROWAVE           0x00800000 // PyroWave extension: 8-bit 4:2:0
+#define SCM_PYROWAVE_444       0x01000000 // PyroWave extension: 8-bit 4:4:4
+#define SCM_PYROWAVE_HDR10     0x02000000 // PyroWave extension: 10-bit 4:2:0 (HDR10 on an HDR display)
+#define SCM_PYROWAVE_HDR10_444 0x04000000 // PyroWave extension: 10-bit 4:4:4
 
 // SCM masks to identify various codec capabilities
 #define SCM_MASK_H264   (SCM_H264 | SCM_H264_HIGH8_444)
 #define SCM_MASK_HEVC   (SCM_HEVC | SCM_HEVC_MAIN10 | SCM_HEVC_REXT8_444 | SCM_HEVC_REXT10_444)
 #define SCM_MASK_AV1    (SCM_AV1_MAIN8 | SCM_AV1_MAIN10 | SCM_AV1_HIGH8_444 | SCM_AV1_HIGH10_444)
-#define SCM_MASK_PYROWAVE (SCM_PYROWAVE | SCM_PYROWAVE_444)
-#define SCM_MASK_10BIT  (SCM_HEVC_MAIN10 | SCM_HEVC_REXT10_444 | SCM_AV1_MAIN10 | SCM_AV1_HIGH10_444)
-#define SCM_MASK_YUV444 (SCM_H264_HIGH8_444 | SCM_HEVC_REXT8_444 | SCM_HEVC_REXT10_444 | SCM_AV1_HIGH8_444 | SCM_AV1_HIGH10_444 | SCM_PYROWAVE_444)
+#define SCM_MASK_PYROWAVE (SCM_PYROWAVE | SCM_PYROWAVE_444 | SCM_PYROWAVE_HDR10 | SCM_PYROWAVE_HDR10_444)
+#define SCM_MASK_10BIT  (SCM_HEVC_MAIN10 | SCM_HEVC_REXT10_444 | SCM_AV1_MAIN10 | SCM_AV1_HIGH10_444 | SCM_PYROWAVE_HDR10 | SCM_PYROWAVE_HDR10_444)
+#define SCM_MASK_YUV444 (SCM_H264_HIGH8_444 | SCM_HEVC_REXT8_444 | SCM_HEVC_REXT10_444 | SCM_AV1_HIGH8_444 | SCM_AV1_HIGH10_444 | SCM_PYROWAVE_444 | SCM_PYROWAVE_HDR10_444)
 
 typedef struct _SERVER_INFORMATION {
     // Server host name or IP address in text form

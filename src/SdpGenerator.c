@@ -461,11 +461,8 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
         }
 
         if (AppVersionQuad[0] >= 7) {
-            // Enable HDR if requested. PyroWave doesn't have a distinct 10-bit format
-            // constant (see VIDEO_FORMAT_PYROWAVE_HDR10 in Limelight.h), so it's checked
-            // separately from VIDEO_FORMAT_MASK_10BIT.
-            if ((NegotiatedVideoFormat & VIDEO_FORMAT_MASK_10BIT) ||
-                    (NegotiatedVideoFormat & VIDEO_FORMAT_PYROWAVE_HDR10)) {
+            // Enable HDR if requested (VIDEO_FORMAT_MASK_10BIT covers the PyroWave 10-bit profiles)
+            if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_10BIT) {
                 err |= addAttributeString(&optionHead, "x-nv-video[0].dynamicRangeMode", "1");
             }
             else {

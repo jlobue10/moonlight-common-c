@@ -1092,19 +1092,21 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_PYROWAVE) &&
                 (serverInfo->serverCodecModeSupport & SCM_PYROWAVE) &&
                 strstr(response.payload, "PYROWAVE/90000")) {
-            // Full-resolution chroma when the client asked for it and the server can do it.
-            if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_PYROWAVE_444) &&
+            // Best mutual profile, like HEVC/AV1 below: 10-bit 4:4:4, 10-bit, 4:4:4, 8-bit 4:2:0.
+            if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_PYROWAVE_HDR10_444) &&
+                    (serverInfo->serverCodecModeSupport & SCM_PYROWAVE_HDR10_444)) {
+                NegotiatedVideoFormat = VIDEO_FORMAT_PYROWAVE_HDR10_444;
+            }
+            else if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_PYROWAVE_HDR10) &&
+                    (serverInfo->serverCodecModeSupport & SCM_PYROWAVE_HDR10)) {
+                NegotiatedVideoFormat = VIDEO_FORMAT_PYROWAVE_HDR10;
+            }
+            else if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_PYROWAVE_444) &&
                     (serverInfo->serverCodecModeSupport & SCM_PYROWAVE_444)) {
                 NegotiatedVideoFormat = VIDEO_FORMAT_PYROWAVE_444;
             }
             else {
                 NegotiatedVideoFormat = VIDEO_FORMAT_PYROWAVE;
-            }
-
-            // Carry the client's HDR intent through, since it doesn't map to a
-            // distinct selectable format the way it does for HEVC/AV1 above.
-            if (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_PYROWAVE_HDR10) {
-                NegotiatedVideoFormat |= VIDEO_FORMAT_PYROWAVE_HDR10;
             }
         }
         else if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1) && strstr(response.payload, "AV1/90000")) {
