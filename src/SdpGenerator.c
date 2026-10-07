@@ -434,6 +434,11 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
         if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) {
             // The PyroWave wire format uses its own packet decoder and is not an AV1 bitstream.
             err |= addAttributeString(&optionHead, "x-nv-vqos[0].bitStreamFormat", "3");
+            // Vibepollo frames PyroWave two ways (docs/pyrowave-protocol.md): length-prefixed
+            // packets for clients that say nothing, or record framing with in-band padding
+            // records for clients that set bit 0x1 here. Record framing adds parity to the
+            // frame's coarsest wavelet level, so a lost packet costs detail, not the frame.
+            err |= addAttributeString(&optionHead, "x-ss-video[0].pyrowaveFeatures", "1");
         }
         else if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_AV1) {
             err |= addAttributeString(&optionHead, "x-nv-vqos[0].bitStreamFormat", "2");
