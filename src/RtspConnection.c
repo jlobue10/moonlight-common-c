@@ -1089,10 +1089,17 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         }
         
         // PyroWave is selected only when the client asked for it and the server both
-        // advertises SCM_PYROWAVE and offers the PYROWAVE media type.
+        // advertises SCM_PYROWAVE, offers the PYROWAVE media type, and declares
+        // the bitstream revision understood by the client decoder.
         int pyroWaveFormat = selectPyroWaveFormat(StreamConfig.supportedVideoFormats,
                                                   serverInfo->serverCodecModeSupport);
-        if (pyroWaveFormat != 0 && strstr(response.payload, "PYROWAVE/90000")) {
+        if (pyroWaveFormat != 0 && (response.payloadLength <= 0 ||
+            !hasCompatiblePyroWaveSdp(response.payload, (size_t)response.payloadLength))) {
+            Limelog("PyroWave unavailable: missing, ambiguous or incompatible SDP bitstream ID (expected "
+                    LI_PYROWAVE_BITSTREAM_ID "). Trying conventional codecs.\n");
+            pyroWaveFormat = 0;
+        }
+        if (pyroWaveFormat != 0) {
             NegotiatedVideoFormat = pyroWaveFormat;
         }
         else if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1) && strstr(response.payload, "AV1/90000")) {

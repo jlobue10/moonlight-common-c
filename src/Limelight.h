@@ -242,6 +242,11 @@ typedef struct _DECODE_UNIT {
 #define VIDEO_FORMAT_PYROWAVE_HDR10     0x40000 // PyroWave 10-bit 4:2:0 (HDR10 on an HDR display)
 #define VIDEO_FORMAT_PYROWAVE_HDR10_444 0x80000 // PyroWave 10-bit 4:4:4
 
+// PyroWave has no in-band version. Keep this ID in sync with the client decoder
+// when updating the vendored codec. Unversioned or mismatched hosts fall back
+// to a conventional codec during RTSP negotiation.
+#define LI_PYROWAVE_BITSTREAM_ID "186f0393"
+
 // Masks for clients to use to match video codecs without profile-specific details.
 #define VIDEO_FORMAT_MASK_H264   0x000F
 #define VIDEO_FORMAT_MASK_H265   0x0F00
