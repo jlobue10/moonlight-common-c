@@ -1,4 +1,5 @@
 #include "Limelight-internal.h"
+#include "VideoFormat.h"
 #include "Rtsp.h"
 
 #define RTSP_CONNECT_TIMEOUT_SEC 10
@@ -1089,25 +1090,10 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         
         // PyroWave is selected only when the client asked for it and the server both
         // advertises SCM_PYROWAVE and offers the PYROWAVE media type.
-        if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_PYROWAVE) &&
-                (serverInfo->serverCodecModeSupport & SCM_PYROWAVE) &&
-                strstr(response.payload, "PYROWAVE/90000")) {
-            // Best mutual profile, like HEVC/AV1 below: 10-bit 4:4:4, 10-bit, 4:4:4, 8-bit 4:2:0.
-            if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_PYROWAVE_HDR10_444) &&
-                    (serverInfo->serverCodecModeSupport & SCM_PYROWAVE_HDR10_444)) {
-                NegotiatedVideoFormat = VIDEO_FORMAT_PYROWAVE_HDR10_444;
-            }
-            else if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_PYROWAVE_HDR10) &&
-                    (serverInfo->serverCodecModeSupport & SCM_PYROWAVE_HDR10)) {
-                NegotiatedVideoFormat = VIDEO_FORMAT_PYROWAVE_HDR10;
-            }
-            else if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_PYROWAVE_444) &&
-                    (serverInfo->serverCodecModeSupport & SCM_PYROWAVE_444)) {
-                NegotiatedVideoFormat = VIDEO_FORMAT_PYROWAVE_444;
-            }
-            else {
-                NegotiatedVideoFormat = VIDEO_FORMAT_PYROWAVE;
-            }
+        int pyroWaveFormat = selectPyroWaveFormat(StreamConfig.supportedVideoFormats,
+                                                  serverInfo->serverCodecModeSupport);
+        if (pyroWaveFormat != 0 && strstr(response.payload, "PYROWAVE/90000")) {
+            NegotiatedVideoFormat = pyroWaveFormat;
         }
         else if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1) && strstr(response.payload, "AV1/90000")) {
             if ((serverInfo->serverCodecModeSupport & SCM_AV1_HIGH10_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH10_444)) {
