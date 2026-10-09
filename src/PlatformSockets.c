@@ -393,14 +393,19 @@ SOCKET bindUdpSocket(int addressFamily, struct sockaddr_storage* localAddr, SOCK
         else {
             Limelog("Unable to set receive buffer size: %d\n", LastSocketError());
         }
+#endif
 
         {
+            // Linux clamps SO_RCVBUF to net.core.rmem_max instead of failing, so the
+            // step-down loop above cannot tell what it got. Log the effective size:
+            // a PyroWave stream that asked for ~11 MB and received 4 MB has ~100 ms
+            // of burst tolerance at 300 Mbps, which matters when reading loss reports.
+            int requestedSize = bufferSize;
             SOCKADDR_LEN len = sizeof(bufferSize);
             if (getsockopt(s, SOL_SOCKET, SO_RCVBUF, (char*)&bufferSize, &len) == 0) {
-                Limelog("Actual receive buffer size: %d\n", bufferSize);
+                Limelog("Receive buffer size: %d (requested %d)\n", bufferSize, requestedSize);
             }
         }
-#endif
     }
 
     return s;

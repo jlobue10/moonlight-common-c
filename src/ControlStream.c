@@ -336,7 +336,9 @@ int initializeControlStream(void) {
     PltCreateEvent(&idrFrameRequiredEvent);
     LbqInitializeLinkedBlockingQueue(&referenceFrameControlQueue, 20);
     LbqInitializeLinkedBlockingQueue(&frameFecStatusQueue, 8); // Limits number of frame status reports per periodic ping interval
-    LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 30);
+    // Steam haptic reports are queued one per packet (a stop must not be coalesced
+    // away), so a burst of UI clicks needs more headroom than rumble/LED callbacks.
+    LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 64);
     PltCreateMutex(&enetMutex);
 
     encryptedControlStream = APP_VERSION_AT_LEAST(7, 1, 431);
