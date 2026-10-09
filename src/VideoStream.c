@@ -32,8 +32,9 @@ static bool receivedFullFrame;
 // much kernel memory with larger packet sizes. It also
 // can smooth over transient pauses in network traffic
 // and subsequent packet/frame bursts that follow.
-// Sized for high-bitrate intra-only codecs such as PyroWave (~11 MB at 1392-byte packets).
-#define RTP_RECV_PACKETS_BUFFERED 8192
+#define RTP_RECV_PACKETS_BUFFERED 2048
+// Only PyroWave needs the larger high-bitrate intra-only receive budget.
+#define PYROWAVE_RTP_RECV_PACKETS_BUFFERED 8192
 
 // Initialize the video stream
 void initializeVideoStream(void) {
@@ -330,7 +331,9 @@ int startVideoStream(void* rendererContext, int drFlags) {
     }
 
     rtpSocket = bindUdpSocket(RemoteAddr.ss_family, &LocalAddr, AddrLen,
-                              RTP_RECV_PACKETS_BUFFERED * (StreamConfig.packetSize + MAX_RTP_HEADER_SIZE),
+                              ((NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) ?
+                               PYROWAVE_RTP_RECV_PACKETS_BUFFERED : RTP_RECV_PACKETS_BUFFERED) *
+                              (StreamConfig.packetSize + MAX_RTP_HEADER_SIZE),
                               SOCK_QOS_TYPE_VIDEO);
     if (rtpSocket == INVALID_SOCKET) {
         VideoCallbacks.cleanup();

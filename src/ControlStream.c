@@ -1129,11 +1129,13 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
         queuedCb->typeIndex = IDX_DS_ADAPTIVE_TRIGGERS;
     }
     else if (ctlHdr->type == packetTypes[IDX_STEAM_HAPTIC]) {
-        BbGet16(&bb, &queuedCb->data.steamHaptic.controllerNumber);
-        BbGet8(&bb, &queuedCb->data.steamHaptic.length);
-        BbGetBytes(&bb, queuedCb->data.steamHaptic.report, STEAM_HAPTIC_REPORT_MAX);
-        if (queuedCb->data.steamHaptic.length < 2 || queuedCb->data.steamHaptic.length > STEAM_HAPTIC_REPORT_MAX) {
-            // A report shorter than its id and one byte, or longer than the wire carries
+        if (!BbGet16(&bb, &queuedCb->data.steamHaptic.controllerNumber) ||
+                !BbGet8(&bb, &queuedCb->data.steamHaptic.length) ||
+                !BbGetBytes(&bb, queuedCb->data.steamHaptic.report, STEAM_HAPTIC_REPORT_MAX) ||
+                queuedCb->data.steamHaptic.length < 2 ||
+                queuedCb->data.steamHaptic.length > STEAM_HAPTIC_REPORT_MAX) {
+            // The wire always carries the full fixed-size report array. ByteBuffer
+            // zero-fills failed reads, so ignoring their result fabricates a report.
             free(queuedCb);
             return;
         }
