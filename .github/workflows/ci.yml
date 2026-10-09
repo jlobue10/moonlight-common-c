@@ -5,6 +5,7 @@ on:
   pull_request:
     branches:
       - master
+      - pyrowave
     types:
       - opened
       - synchronize
@@ -16,6 +17,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  regressions:
+    name: Sanitized transport regressions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CFLAGS: -g -fsanitize=address,undefined -fno-omit-frame-pointer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Build and test packet parsing and codec negotiation
+        run: |
+          cmake -S . -B build_sanitized -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="$CFLAGS"
+          cmake --build build_sanitized --parallel 2
+          sh tests/run-regressions.sh build_sanitized
+
   build:
     strategy:
       fail-fast: false
