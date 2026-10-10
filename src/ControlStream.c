@@ -111,6 +111,71 @@ static bool encryptedControlStream;
 static bool hdrEnabled;
 static SS_HDR_METADATA hdrMetadata;
 
+// Server-command lifetime gate. Unlike our worker threads, API callers are not
+// joined by stopControlStream(). Keep admission state alive across sessions and
+// drain admitted sends before the peer, cipher and enetMutex can be retired.
+// The state lock protects only these counters, never network work or waiting.
+#if defined(LC_WINDOWS)
+static volatile LONG serverCommandStateLock;
+#else
+static volatile int serverCommandStateLock;
+#endif
+static bool serverCommandsEnabled;
+static unsigned serverCommandsInFlight;
+
+static void lockServerCommandState(void) {
+#if defined(LC_WINDOWS)
+    while (InterlockedCompareExchange(&serverCommandStateLock, 1, 0) != 0) {
+#else
+    while (__atomic_exchange_n(&serverCommandStateLock, 1, __ATOMIC_ACQUIRE) != 0) {
+#endif
+        PltSleepMs(0);
+    }
+}
+
+static void unlockServerCommandState(void) {
+#if defined(LC_WINDOWS)
+    InterlockedExchange(&serverCommandStateLock, 0);
+#else
+    __atomic_store_n(&serverCommandStateLock, 0, __ATOMIC_RELEASE);
+#endif
+}
+
+static bool beginServerCommand(void) {
+    lockServerCommandState();
+    bool accepted = serverCommandsEnabled;
+    if (accepted) {
+        serverCommandsInFlight++;
+    }
+    unlockServerCommandState();
+    return accepted;
+}
+
+static void endServerCommand(void) {
+    lockServerCommandState();
+    LC_ASSERT(serverCommandsInFlight != 0);
+    serverCommandsInFlight--;
+    unlockServerCommandState();
+}
+
+static void closeServerCommands(void) {
+    lockServerCommandState();
+    serverCommandsEnabled = false;
+    while (serverCommandsInFlight != 0) {
+        unlockServerCommandState();
+        PltSleepMs(1);
+        lockServerCommandState();
+    }
+    unlockServerCommandState();
+}
+
+static void openServerCommands(void) {
+    lockServerCommandState();
+    LC_ASSERT(serverCommandsInFlight == 0);
+    serverCommandsEnabled = true;
+    unlockServerCommandState();
+}
+
 // Process-lifetime lock: HDR queries are valid before the first connection and
 // retain the last reported state after teardown. Only a fixed-size copy is made
 // while held; parsing, callbacks, allocation and network work remain outside.
@@ -366,6 +431,7 @@ static bool supportsIdrFrameRequest;
 
 // Initializes the control stream
 int initializeControlStream(void) {
+    closeServerCommands();
     stopping = false;
     PltCreateEvent(&idrFrameRequiredEvent);
     LbqInitializeLinkedBlockingQueue(&referenceFrameControlQueue, 20);
@@ -443,6 +509,7 @@ static void freeBasicLbqList(PLINKED_BLOCKING_QUEUE_ENTRY entry) {
 
 // Cleans up control stream
 void destroyControlStream(void) {
+    closeServerCommands();
     LC_ASSERT(stopping);
     PltDestroyCryptoContext(encryptionCtx);
     PltDestroyCryptoContext(decryptionCtx);
@@ -1756,6 +1823,7 @@ static void requestIdrFrameFunc(void* context) {
 
 // Stops the control stream
 int stopControlStream(void) {
+    closeServerCommands();
     stopping = true;
     LbqSignalQueueShutdown(&referenceFrameControlQueue);
     LbqSignalQueueShutdown(&frameFecStatusQueue);
@@ -2184,6 +2252,7 @@ int startControlStream(void) {
         }
     }
 
+    openServerCommands();
     return 0;
 }
 
@@ -2216,20 +2285,18 @@ bool LiGetHdrMetadata(PSS_HDR_METADATA metadata) {
 
 // Send a server cmd request to the streaming machine
 int LiSendExecServerCmd(uint8_t cmdId) {
-    // Only Sunshine-class hosts define this message; the other packetTypes
-    // tables hold -1 for it, which would go out as type 0xFFFF.
-    if (!IS_SUNSHINE() || packetTypes[IDX_EXEC_SERVER_CMD] < 0) {
+    if (!beginServerCommand()) {
         return -1;
     }
-    // Unlike the input APIs, nothing else stops a caller after the control stream
-    // is gone: stopControlStream() sets stopping before tearing the peer, mutex and
-    // cipher down, and initializeControlStream() clears it for the next session.
-    if (stopping || peer == NULL) {
+    // Only Sunshine-class hosts define this message; the other packetTypes
+    // tables hold -1 for it, which would go out as type 0xFFFF.
+    if (!IS_SUNSHINE() || packetTypes[IDX_EXEC_SERVER_CMD] < 0 || peer == NULL) {
+        endServerCommand();
         return -1;
     }
 
     uint8_t payload[4] = {cmdId, 0, 0, 0};
-    return sendMessageAndForget(
+    int result = sendMessageAndForget(
         packetTypes[IDX_EXEC_SERVER_CMD],
         sizeof(payload),
         payload,
@@ -2237,16 +2304,22 @@ int LiSendExecServerCmd(uint8_t cmdId) {
         ENET_PACKET_FLAG_RELIABLE,
         false
     );
+    endServerCommand();
+    return result;
 }
 
 // Send a server cmd request to the streaming machine
 int LiSendEmptyPayload(void) {
-    if (!IS_SUNSHINE() || stopping || peer == NULL) {
+    if (!beginServerCommand()) {
+        return -1;
+    }
+    if (!IS_SUNSHINE() || peer == NULL) {
+        endServerCommand();
         return -1;
     }
 
     uint8_t payload[4] = {0xAA, 0x55, 0xAA, 0x55};
-    return sendMessageAndForget(
+    int result = sendMessageAndForget(
         0x00,
         sizeof(payload),
         payload,
@@ -2254,4 +2327,6 @@ int LiSendEmptyPayload(void) {
         ENET_PACKET_FLAG_RELIABLE,
         false
     );
+    endServerCommand();
+    return result;
 }
