@@ -60,7 +60,7 @@ static int addPacket(uint32_t frame, uint16_t seq, uint32_t fecIndex, uint32_t d
     PNV_VIDEO_PACKET nv = (PNV_VIDEO_PACKET)(buffer + sizeof(RTP_PACKET) + 4);
     nv->streamPacketIndex = LE32(seq);
     nv->frameIndex = LE32(frame);
-    nv->flags = (sof ? FLAG_SOF : 0) | (eof ? FLAG_EOF : 0);
+    nv->flags = (sof ? FLAG_SOF : 0) | (eof ? FLAG_EOF : 0) | FLAG_CONTAINS_PIC_DATA;  // recovered shards are sanity-checked for it
     nv->multiFecFlags = 0x10;
     nv->multiFecBlocks = 0x00;  // block 0 of 1
     nv->fecInfo = LE32((dataPackets << 22) | (fecIndex << 12) | (0u << 4));
@@ -80,7 +80,7 @@ static char* buildFecPacket(uint32_t frame, uint16_t seq, uint32_t fecIndex, uin
     PNV_VIDEO_PACKET nv = (PNV_VIDEO_PACKET)(buffer + sizeof(RTP_PACKET) + 4);
     nv->streamPacketIndex = LE32(seq);
     nv->frameIndex = LE32(frame);
-    nv->flags = (sof ? FLAG_SOF : 0) | (eof ? FLAG_EOF : 0);
+    nv->flags = (sof ? FLAG_SOF : 0) | (eof ? FLAG_EOF : 0) | FLAG_CONTAINS_PIC_DATA;  // recovered shards are sanity-checked for it
     nv->multiFecFlags = 0x10;
     nv->multiFecBlocks = 0x00;
     nv->fecInfo = LE32((dataPackets << 22) | (fecIndex << 12) | (fecPercentage << 4));
@@ -155,7 +155,7 @@ static int addFecPacket(uint32_t frame, uint16_t seq, uint32_t fecIndex, uint32_
     PNV_VIDEO_PACKET nv = (PNV_VIDEO_PACKET)(buffer + sizeof(RTP_PACKET) + 4);
     nv->streamPacketIndex = LE32(seq);
     nv->frameIndex = LE32(frame);
-    nv->flags = (sof ? FLAG_SOF : 0) | (eof ? FLAG_EOF : 0);
+    nv->flags = (sof ? FLAG_SOF : 0) | (eof ? FLAG_EOF : 0) | FLAG_CONTAINS_PIC_DATA;  // recovered shards are sanity-checked for it
     nv->multiFecFlags = 0x10;
     nv->multiFecBlocks = 0x00;
     nv->fecInfo = LE32((dataPackets << 22) | (fecIndex << 12) | (fecPercentage << 4));
