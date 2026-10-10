@@ -36,6 +36,27 @@ int main(void) {
         freeMessage(&message);
         free(buffer);  // the options point into it; freeMessage() frees only the nodes
     }
+    {
+        // A status outside 100..999 (including atoi's 0 for garbage) is malformed,
+        // not a success code the handshake would return as 0.
+        static const char* bad[] = {"RTSP/1.0 0 OK\r\nCSeq: 2\r\n\r\n", "RTSP/1.0 abc OK\r\nCSeq: 2\r\n\r\n",
+                                    "RTSP/1.0 1000 OK\r\nCSeq: 2\r\n\r\n"};
+        for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            RTSP_MESSAGE message;
+            char* buffer = strdup(bad[i]);
+            int result = parseRtspMessage(&message, buffer, (int)strlen(buffer));
+            check(result == RTSP_ERROR_MALFORMED, "a response with an out-of-range status code is malformed");
+            if (result == RTSP_ERROR_SUCCESS) freeMessage(&message);
+            free(buffer);
+        }
+        RTSP_MESSAGE message;
+        char* buffer = strdup("RTSP/1.0 404 Not Found\r\nCSeq: 3\r\n\r\n");
+        check(parseRtspMessage(&message, buffer, (int)strlen(buffer)) == RTSP_ERROR_SUCCESS &&
+                  message.message.response.statusCode == 404,
+              "an in-range error status still parses");
+        freeMessage(&message);
+        free(buffer);
+    }
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;
 }

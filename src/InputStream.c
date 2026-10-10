@@ -386,6 +386,13 @@ static void inputSendThreadProc(void* context) {
             }
             PltUnlockMutex(&batchedInputMutex);
 
+            if (deltaX == 0 && deltaY == 0) {
+                // The batch coalesced to nothing. Whatever was sent before it went
+                // out with moreData set on the strength of this holder, so push it
+                // now instead of waiting for the receive thread's next service.
+                flushInputOnControlStream();
+            }
+
             // Send as many packets as it takes to get the entire delta through
             while (deltaX != 0 || deltaY != 0) {
                 int packetX = CLAMP(deltaX, INT16_MIN, INT16_MAX);
@@ -922,6 +929,11 @@ int LiSendUtf8TextEvent(const char *text, unsigned int length) {
 
     if (!initialized) {
         return -2;
+    }
+    if (text == NULL || length > INT_MAX / 2) {
+        // allocatePacketHolder() takes an int; a length that wrapped negative would
+        // hand back a standard holder and the memcpy below would overflow it.
+        return -1;
     }
 
     holder = allocatePacketHolder(length);

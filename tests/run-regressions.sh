@@ -11,7 +11,7 @@ for test in steam_haptic hdr_state control_truncation video_drain rtp_admission 
     # Exercise ownership and oversized-FEC admission assertions in debug builds.
     # (test_rtp_staging.c builds blocks by hand and #undefs LC_DEBUG itself before
     # including the queue, so it is deliberately not on this list.)
-    if [ "$test" = video_drain ] || [ "$test" = rtp_admission ]; then extra_flags=-DLC_DEBUG; fi
+    if [ "$test" = video_drain ] || [ "$test" = rtp_admission ] || [ "$test" = mouse_batching ] || [ "$test" = controller_batching ]; then extra_flags=-DLC_DEBUG; fi
     "$cc" ${CFLAGS:-} $extra_flags -ffunction-sections -fdata-sections -DHAS_SOCKLEN_T \
         -I"$repo/src" -I"$repo/enet/include" -I"$repo/nanors" -I"$repo/nanors/deps" -I"$repo/nanors/deps/obl" \
         "$repo/tests/test_$test.c" \
