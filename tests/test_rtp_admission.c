@@ -8,6 +8,7 @@
 #define connectionSendFrameFecStatus testFecStatus
 #define LiRequestIdrFrame testRequestIdr
 #define isReferenceFrameInvalidationEnabled testRfiEnabled
+#include <assert.h>
 #include "../src/Limelight-internal.h"
 #include "../src/RtpVideoQueue.c"
 #undef PltGetMicroseconds
