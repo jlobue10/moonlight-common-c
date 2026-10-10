@@ -11,7 +11,8 @@ for test in steam_haptic hdr_state control_truncation video_drain rtp_admission;
     # Queue ownership assertions are part of the decoder-race reproduction.
     if [ "$test" = video_drain ]; then extra_flags=-DLC_DEBUG; fi
     "$cc" ${CFLAGS:-} $extra_flags -ffunction-sections -fdata-sections -DHAS_SOCKLEN_T \
-        -I"$repo/src" -I"$repo/enet/include" "$repo/tests/test_$test.c" \
+        -I"$repo/src" -I"$repo/enet/include" -I"$repo/nanors" -I"$repo/nanors/deps" -I"$repo/nanors/deps/obl" \
+        "$repo/tests/test_$test.c" \
         -L"$build" -lmoonlight-common-c -Wl,--gc-sections -Wl,-rpath,"$build" \
         -pthread -o "$build/test-$test"
 done
