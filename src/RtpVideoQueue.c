@@ -194,7 +194,7 @@ static int reconstructFrame(PRTP_VIDEO_QUEUE queue) {
     // We'll need an extra packet to run in FEC validation mode, because we will
     // be "dropping" one below and recovering it using parity. However, some frames
     // are so large that FEC is disabled entirely, so don't wait for parity on those.
-    neededPackets += queue->fecPercentage ? 1 : 0;
+    neededPackets += queue->bufferParityPackets != 0 ? 1 : 0;
 #endif
 
     LC_ASSERT(totalPackets - neededPackets <= queue->bufferParityPackets);
@@ -234,7 +234,7 @@ static int reconstructFrame(PRTP_VIDEO_QUEUE queue) {
 
 #ifdef FEC_VALIDATION_MODE
     // If FEC is disabled or unsupported for this frame, we must bail early here.
-    if ((queue->fecPercentage == 0 || AppVersionQuad[0] < 5) &&
+    if ((queue->bufferParityPackets == 0 || AppVersionQuad[0] < 5) &&
             queue->receivedDataPackets == queue->bufferDataPackets) {
 #else
     if (queue->receivedDataPackets == queue->bufferDataPackets) {
@@ -703,6 +703,19 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
         queue->bufferHighestSequenceNumber = U16(queue->bufferFirstParitySequenceNumber + queue->bufferParityPackets - 1);
         queue->multiFecCurrentBlockNumber = fecCurrentBlockNumber;
         queue->multiFecLastBlockNumber = (nvPacket->multiFecBlocks >> 6) & 0x3;
+
+        // nanors refuses more than DATA_SHARDS_MAX shards per block, so parity for a
+        // larger block can never recover anything. Decide that once here rather than
+        // allocating and failing reed_solomon_new() for every parity packet (and
+        // asserting on it in debug builds): treat the block as unprotected, which
+        // rejects its parity shards as above the window.
+        if (queue->bufferParityPackets != 0 &&
+                queue->bufferDataPackets + queue->bufferParityPackets > DATA_SHARDS_MAX) {
+            Limelog("Frame %u: %u+%u shards exceed the %u-shard FEC limit; ignoring its parity\n",
+                    queue->currentFrameNumber, queue->bufferDataPackets, queue->bufferParityPackets, DATA_SHARDS_MAX);
+            queue->bufferParityPackets = 0;
+            queue->bufferHighestSequenceNumber = U16(queue->bufferFirstParitySequenceNumber - 1);
+        }
 
         queue->stats.packetCountVideo += queue->bufferDataPackets;
         queue->stats.packetCountFec += queue->bufferParityPackets;

@@ -762,7 +762,10 @@ bool isInSubnetV6(struct sockaddr_in6* sin6, unsigned char* subnet, int prefixLe
     int i;
 
     for (i = 0; i < prefixLength; i++) {
-        unsigned char mask = 1 << (i % 8);
+        // Prefix bits count from the most significant bit of each byte
+        // (network order); walking from the LSB compared the wrong bits, so
+        // fd00::/8 (the ULA form every router hands out) failed fc00::/7.
+        unsigned char mask = (unsigned char)(0x80 >> (i % 8));
         if ((sin6->sin6_addr.s6_addr[i / 8] & mask) != (subnet[i / 8] & mask)) {
             return false;
         }

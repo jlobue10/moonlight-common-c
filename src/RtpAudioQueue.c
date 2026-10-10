@@ -301,6 +301,21 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
         return NULL;
     }
 
+    // A FEC shard never legitimately precedes its data by more than a block or
+    // two. Its header is not authenticated, and a far-future base would open a
+    // tail block that makes handleMissingPackets() abandon the current block at
+    // once (two packets of concealment and a permanent exit from fast recovery
+    // per shard). Data packets are not bounded here: a long loss burst must
+    // still be able to move the queue forward.
+    if (packet->packetType == RTP_PAYLOAD_TYPE_FEC && !queue->synchronizing &&
+            isBefore16(queue->nextRtpSequenceNumber, fecBlockBaseSeqNum) &&
+            U16(fecBlockBaseSeqNum - queue->nextRtpSequenceNumber) > RTPA_MAX_FEC_BLOCKS_AHEAD * RTPA_DATA_SHARDS) {
+        queue->stats.packetCountFecInvalid++;
+        Limelog("Ignoring audio FEC shard %u packets ahead of the next expected packet\n",
+                U16(fecBlockBaseSeqNum - queue->nextRtpSequenceNumber));
+        return NULL;
+    }
+
     // Look for an existing FEC block
     PRTPA_FEC_BLOCK existingBlock = queue->blockHead;
     while (existingBlock != NULL) {

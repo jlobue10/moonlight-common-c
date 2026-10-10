@@ -15,6 +15,9 @@ typedef struct _reed_solomon reed_solomon;
 // Maximum number of FEC block entries to cache
 #define RTPA_CACHED_FEC_BLOCK_LIMIT 4
 
+// How far ahead of the next expected packet a FEC shard may open a block
+#define RTPA_MAX_FEC_BLOCKS_AHEAD 8
+
 typedef struct _AUDIO_FEC_HEADER {
     uint8_t fecShardIndex;
     uint8_t payloadType;
