@@ -2221,6 +2221,12 @@ int LiSendExecServerCmd(uint8_t cmdId) {
     if (!IS_SUNSHINE() || packetTypes[IDX_EXEC_SERVER_CMD] < 0) {
         return -1;
     }
+    // Unlike the input APIs, nothing else stops a caller after the control stream
+    // is gone: stopControlStream() sets stopping before tearing the peer, mutex and
+    // cipher down, and initializeControlStream() clears it for the next session.
+    if (stopping || peer == NULL) {
+        return -1;
+    }
 
     uint8_t payload[4] = {cmdId, 0, 0, 0};
     return sendMessageAndForget(
@@ -2235,7 +2241,7 @@ int LiSendExecServerCmd(uint8_t cmdId) {
 
 // Send a server cmd request to the streaming machine
 int LiSendEmptyPayload(void) {
-    if (!IS_SUNSHINE()) {
+    if (!IS_SUNSHINE() || stopping || peer == NULL) {
         return -1;
     }
 
