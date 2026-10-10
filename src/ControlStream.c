@@ -2216,6 +2216,12 @@ bool LiGetHdrMetadata(PSS_HDR_METADATA metadata) {
 
 // Send a server cmd request to the streaming machine
 int LiSendExecServerCmd(uint8_t cmdId) {
+    // Only Sunshine-class hosts define this message; the other packetTypes
+    // tables hold -1 for it, which would go out as type 0xFFFF.
+    if (!IS_SUNSHINE() || packetTypes[IDX_EXEC_SERVER_CMD] < 0) {
+        return -1;
+    }
+
     uint8_t payload[4] = {cmdId, 0, 0, 0};
     return sendMessageAndForget(
         packetTypes[IDX_EXEC_SERVER_CMD],
@@ -2228,7 +2234,11 @@ int LiSendExecServerCmd(uint8_t cmdId) {
 }
 
 // Send a server cmd request to the streaming machine
-int LiSendEmptyPayload() {
+int LiSendEmptyPayload(void) {
+    if (!IS_SUNSHINE()) {
+        return -1;
+    }
+
     uint8_t payload[4] = {0xAA, 0x55, 0xAA, 0x55};
     return sendMessageAndForget(
         0x00,

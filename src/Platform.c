@@ -2,6 +2,7 @@
 #include "Limelight-internal.h"
 
 #if defined(__ANDROID__)
+#include <errno.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -100,10 +101,18 @@ void* ThreadProc(void* context) {
     // thread started the connection (0) and compete with the UI and compositor.
     // This is what android.os.Process.setThreadPriority(THREAD_PRIORITY_URGENT_DISPLAY)
     // does for the MediaCodec path; the PyroWave path has no Java decode thread.
+    // ControlRecv parses the host's feedback (Steam haptics, rumble, motion
+    // requests) and CtrlAsyncCb delivers it to the Java callbacks and the HID
+    // write, so they sit on the haptic latency path as much as InputSend does.
     if (strcmp(ctx->name, "VideoRecv") == 0 || strcmp(ctx->name, "VideoDec") == 0 ||
             strcmp(ctx->name, "AudioRecv") == 0 || strcmp(ctx->name, "AudioDec") == 0 ||
-            strcmp(ctx->name, "InputSend") == 0) {
-        setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), -8);
+            strcmp(ctx->name, "InputSend") == 0 || strcmp(ctx->name, "ControlRecv") == 0 ||
+            strcmp(ctx->name, "CtrlAsyncCb") == 0) {
+        if (setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), -8) != 0) {
+            // RLIMIT_NICE can forbid the boost on some ROMs; say so once per thread
+            // so a slow device is not mistaken for a decoder problem.
+            Limelog("setpriority(%s, -8) failed: %d\n", ctx->name, errno);
+        }
     }
 #endif
 
