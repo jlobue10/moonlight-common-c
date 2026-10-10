@@ -1117,6 +1117,11 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
     BYTE_BUFFER bb;
     PQUEUED_ASYNC_CALLBACK queuedCb;
     int err;
+    bool valid = true;
+
+    if (packetLength < (int)sizeof(*ctlHdr)) {
+        return;
+    }
 
     LC_ASSERT(needsAsyncCallback(ctlHdr->type));
 
@@ -1128,47 +1133,46 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
     BbInitializeWrappedBuffer(&bb, (char*)ctlHdr, sizeof(*ctlHdr), packetLength - sizeof(*ctlHdr), BYTE_ORDER_LITTLE);
 
     if (ctlHdr->type == packetTypes[IDX_RUMBLE_DATA]) {
-        BbAdvanceBuffer(&bb, 4);
-
-        BbGet16(&bb, &queuedCb->data.rumble.controllerNumber);
-        BbGet16(&bb, &queuedCb->data.rumble.lowFreqRumble);
-        BbGet16(&bb, &queuedCb->data.rumble.highFreqRumble);
+        valid = BbAdvanceBuffer(&bb, 4) &&
+                BbGet16(&bb, &queuedCb->data.rumble.controllerNumber) &&
+                BbGet16(&bb, &queuedCb->data.rumble.lowFreqRumble) &&
+                BbGet16(&bb, &queuedCb->data.rumble.highFreqRumble);
 
         queuedCb->typeIndex = IDX_RUMBLE_DATA;
     }
     else if (ctlHdr->type == packetTypes[IDX_RUMBLE_TRIGGER_DATA]) {
-        BbGet16(&bb, &queuedCb->data.rumbleTriggers.controllerNumber);
-        BbGet16(&bb, &queuedCb->data.rumbleTriggers.leftTriggerMotor);
-        BbGet16(&bb, &queuedCb->data.rumbleTriggers.rightTriggerMotor);
+        valid = BbGet16(&bb, &queuedCb->data.rumbleTriggers.controllerNumber) &&
+                BbGet16(&bb, &queuedCb->data.rumbleTriggers.leftTriggerMotor) &&
+                BbGet16(&bb, &queuedCb->data.rumbleTriggers.rightTriggerMotor);
 
         queuedCb->typeIndex = IDX_RUMBLE_TRIGGER_DATA;
     }
     else if (ctlHdr->type == packetTypes[IDX_SET_MOTION_EVENT]) {
-        BbGet16(&bb, &queuedCb->data.setMotionEventState.controllerNumber);
-        BbGet16(&bb, &queuedCb->data.setMotionEventState.reportRateHz);
-        BbGet8(&bb, &queuedCb->data.setMotionEventState.motionType);
+        valid = BbGet16(&bb, &queuedCb->data.setMotionEventState.controllerNumber) &&
+                BbGet16(&bb, &queuedCb->data.setMotionEventState.reportRateHz) &&
+                BbGet8(&bb, &queuedCb->data.setMotionEventState.motionType);
 
         queuedCb->typeIndex = IDX_SET_MOTION_EVENT;
     }
     else if (ctlHdr->type == packetTypes[IDX_SET_RGB_LED]) {
-        BbGet16(&bb, &queuedCb->data.setControllerLed.controllerNumber);
-        BbGet8(&bb, &queuedCb->data.setControllerLed.r);
-        BbGet8(&bb, &queuedCb->data.setControllerLed.g);
-        BbGet8(&bb, &queuedCb->data.setControllerLed.b);
+        valid = BbGet16(&bb, &queuedCb->data.setControllerLed.controllerNumber) &&
+                BbGet8(&bb, &queuedCb->data.setControllerLed.r) &&
+                BbGet8(&bb, &queuedCb->data.setControllerLed.g) &&
+                BbGet8(&bb, &queuedCb->data.setControllerLed.b);
 
         queuedCb->typeIndex = IDX_SET_RGB_LED;
     }
     else if (ctlHdr->type == packetTypes[IDX_HDR_INFO]) {
+        valid = bb.length >= 1;
         queuedCb->typeIndex = IDX_HDR_INFO;
     }
     else if (ctlHdr->type == packetTypes[IDX_DS_ADAPTIVE_TRIGGERS]){
-        BbGet16(&bb, &queuedCb->data.dsAdaptiveTrigger.controllerNumber);
-        BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.eventFlags);
-        BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.typeLeft);
-        BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.typeRight);
-
-        BbGetBytes(&bb, queuedCb->data.dsAdaptiveTrigger.left, DS_EFFECT_PAYLOAD_SIZE);
-        BbGetBytes(&bb, queuedCb->data.dsAdaptiveTrigger.right, DS_EFFECT_PAYLOAD_SIZE);
+        valid = BbGet16(&bb, &queuedCb->data.dsAdaptiveTrigger.controllerNumber) &&
+                BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.eventFlags) &&
+                BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.typeLeft) &&
+                BbGet8(&bb, &queuedCb->data.dsAdaptiveTrigger.typeRight) &&
+                BbGetBytes(&bb, queuedCb->data.dsAdaptiveTrigger.left, DS_EFFECT_PAYLOAD_SIZE) &&
+                BbGetBytes(&bb, queuedCb->data.dsAdaptiveTrigger.right, DS_EFFECT_PAYLOAD_SIZE);
         queuedCb->typeIndex = IDX_DS_ADAPTIVE_TRIGGERS;
     }
     else if (ctlHdr->type == packetTypes[IDX_STEAM_HAPTIC]) {
@@ -1191,6 +1195,13 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
         return;
     }
 
+    if (!valid) {
+        // Failed ByteBuffer reads can fabricate zero-valued state and displace a
+        // real pending update. Only complete payloads may enter the callback queue.
+        free(queuedCb);
+        return;
+    }
+
     void* displaced = NULL;
     err = LbqOfferQueueItemPriority(&asyncCallbackQueue, queuedCb, &queuedCb->entry,
         sameCallbackState, isCallbackState, 32, &displaced);
@@ -1208,7 +1219,9 @@ static void updateHdrState(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLength
 
     BbInitializeWrappedBuffer(&bb, (char*)ctlHdr, sizeof(*ctlHdr), packetLength - sizeof(*ctlHdr), BYTE_ORDER_LITTLE);
 
-    BbGet8(&bb, &enableByte);
+    if (!BbGet8(&bb, &enableByte)) {
+        return;
+    }
     if (IS_SUNSHINE()) {
         // Sunshine sends HDR metadata in this message too
         for (int i = 0; i < 3; i++) {
