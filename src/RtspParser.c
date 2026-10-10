@@ -163,7 +163,10 @@ int parseRtspMessage(PRTSP_MESSAGE msg, char* rtspMessage, int length) {
                 newOpt->option = opt;
                 newOpt->content = token + 1; // Skip the protocol defined blank space
                 newOpt->next = NULL;
-                insertOption(&options, newOpt);
+                if (!insertOption(&options, newOpt)) {
+                    // Duplicate header: the earlier node took the content
+                    free(newOpt);
+                }
 
                 // Check if we're at the end of the message portion marked by \r\n\r\n
                 // endCheck points to the remainder of messageBuffer after the token.
@@ -288,29 +291,32 @@ char* getOptionContent(POPTION_ITEM optionsHead, char* option) {
 }
 
 // Adds new option opt to the struct's option list
-void insertOption(POPTION_ITEM* optionsHead, POPTION_ITEM opt) {
+bool insertOption(POPTION_ITEM* optionsHead, POPTION_ITEM opt) {
     POPTION_ITEM current = *optionsHead;
     opt->next = NULL;
 
     // Empty options list
     if (*optionsHead == NULL) {
         *optionsHead = opt;
-        return;
+        return true;
     }
 
     // Traverse the list and insert the new option at the end
     while (current != NULL) {
-        // Check for duplicate option; if so, replace the option currently there
+        // Check for duplicate option; if so, replace the option currently there.
+        // The caller keeps ownership of `opt` (it leaked one node per duplicate
+        // header of a host response before).
         if (!strcmp(current->option, opt->option)) {
             current->content = opt->content;
-            return;
+            return false;
         }
         if (current->next == NULL) {
             current->next = opt;
-            return;
+            return true;
         }
         current = current->next;
     }
+    return false;
 }
 
 // Free every node in the message's option list

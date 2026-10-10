@@ -6,10 +6,12 @@ build=${1:?Usage: tests/run-regressions.sh path/to/cmake-build}
 build=$(CDPATH= cd -- "$build" && pwd)
 cc=${CC:-cc}
 # Match sanitizer flags used to build the library via CFLAGS, when applicable.
-for test in steam_haptic hdr_state control_truncation video_drain rtp_admission rtp_staging socket_subnet input_motion audio_queue; do
+for test in steam_haptic hdr_state control_truncation video_drain rtp_admission rtp_staging socket_subnet input_motion audio_queue rtsp_parser input_utf8; do
     extra_flags=
     # Exercise ownership and oversized-FEC admission assertions in debug builds.
-    if [ "$test" = video_drain ] || [ "$test" = rtp_admission ] || [ "$test" = rtp_staging ]; then extra_flags=-DLC_DEBUG; fi
+    # (test_rtp_staging.c builds blocks by hand and #undefs LC_DEBUG itself before
+    # including the queue, so it is deliberately not on this list.)
+    if [ "$test" = video_drain ] || [ "$test" = rtp_admission ]; then extra_flags=-DLC_DEBUG; fi
     "$cc" ${CFLAGS:-} $extra_flags -ffunction-sections -fdata-sections -DHAS_SOCKLEN_T \
         -I"$repo/src" -I"$repo/enet/include" -I"$repo/nanors" -I"$repo/nanors/deps" -I"$repo/nanors/deps/obl" \
         "$repo/tests/test_$test.c" \
@@ -28,5 +30,7 @@ done
 "$build/test-socket_subnet"
 "$build/test-input_motion"
 "$build/test-audio_queue"
+"$build/test-rtsp_parser"
+"$build/test-input_utf8"
 "$build/test-video-format"
-python3 "$repo/tests/test_server_commands.py"
+python3 -I "$repo/tests/test_server_commands.py"
