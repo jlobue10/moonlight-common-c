@@ -1019,15 +1019,16 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         // Create a client that can use 1 outgoing connection and 1 channel
         client = enet_host_create(RemoteAddr.ss_family, NULL, 1, 1, 0, 0);
         if (client == NULL) {
-            return -1;
+            // Exit releases the crypto contexts created above
+            ret = -1;
+            goto Exit;
         }
 
         // Connect to the host
         peer = enet_host_connect(client, &address, 1, 0);
         if (peer == NULL) {
-            enet_host_destroy(client);
-            client = NULL;
-            return -1;
+            ret = -1;
+            goto Exit;
         }
 
         // Wait for the connect to complete
@@ -1036,9 +1037,8 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             Limelog("RTSP: Failed to connect to UDP port %u: error %d\n", RtspPortNumber, LastSocketFail());
             enet_peer_reset(peer);
             peer = NULL;
-            enet_host_destroy(client);
-            client = NULL;
-            return -1;
+            ret = -1;
+            goto Exit;
         }
 
         // Ensure the connect verify ACK is sent immediately
@@ -1247,6 +1247,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
 
         if (sessionId == NULL) {
             Limelog("RTSP SETUP streamid=audio is missing session attribute\n");
+            freeMessage(&response);
             ret = -1;
             goto Exit;
         }
@@ -1259,6 +1260,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         sessionToken = strtok_r(sessionId, ";", &strtokCtx);
         if (sessionToken == NULL || sessionToken[0] == '\0') {
             Limelog("RTSP SETUP streamid=audio has malformed session attribute\n");
+            freeMessage(&response);
             ret = -1;
             goto Exit;
         }
@@ -1266,6 +1268,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         sessionIdString = strdup(sessionToken);
         if (sessionIdString == NULL) {
             Limelog("Failed to duplicate session ID string\n");
+            freeMessage(&response);
             ret = -1;
             goto Exit;
         }

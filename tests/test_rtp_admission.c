@@ -8,6 +8,7 @@
 #define connectionSendFrameFecStatus testFecStatus
 #define LiRequestIdrFrame testRequestIdr
 #define isReferenceFrameInvalidationEnabled testRfiEnabled
+#include <assert.h>
 #include "../src/Limelight-internal.h"
 #include "../src/RtpVideoQueue.c"
 #undef PltGetMicroseconds
@@ -18,13 +19,24 @@
 #undef LiRequestIdrFrame
 #undef isReferenceFrameInvalidationEnabled
 
-static int delivered, lostFrames, lastDeliveredSeq, deliveredInOrder = 1;
+static int delivered, lostFrames, lastDeliveredSeq, deliveredInOrder = 1, verifyPayload, payloadMismatches;
+#define PAYLOAD 1392
+// Deterministic payload per sequence number, so recovered shards can be checked byte for byte.
+static void fillPayload(unsigned char* data, uint16_t seq) {
+    for (int i = 0; i < PAYLOAD; i++) data[i] = (unsigned char)(seq * 31 + i * 7);
+}
 // The transport clock is initialized by connection startup in production.
 uint64_t testGetMicroseconds(void) { static uint64_t now = 1000000; return ++now; }
 void testQueueRtpPacket(PRTPV_QUEUE_ENTRY entry) {
     if (delivered && U16(entry->packet->sequenceNumber) != U16(lastDeliveredSeq + 1)) deliveredInOrder = 0;
     lastDeliveredSeq = entry->packet->sequenceNumber;
     ++delivered;
+    if (verifyPayload) {
+        unsigned char expected[PAYLOAD];
+        fillPayload(expected, entry->packet->sequenceNumber);
+        const unsigned char* data = (const unsigned char*)entry->packet + sizeof(RTP_PACKET) + 4 + sizeof(NV_VIDEO_PACKET);
+        if (memcmp(data, expected, PAYLOAD) != 0) ++payloadMismatches;
+    }
     free(entry->packet);
 }
 void testNotifyFrameLost(unsigned int frameNumber, bool speculative) { (void)frameNumber; (void)speculative; ++lostFrames; }
@@ -37,7 +49,6 @@ static RTP_VIDEO_QUEUE queue;
 static int checks, failures;
 static void check(int ok, const char* text) { ++checks; printf("%s %s\n", ok ? "PASS" : "FAIL", text); failures += !ok; }
 
-#define PAYLOAD 1392
 // Builds one data shard of a block with no parity (fecPercentage 0), as the host sends.
 static int addPacket(uint32_t frame, uint16_t seq, uint32_t fecIndex, uint32_t dataPackets, int sof, int eof) {
     const int headerLen = sizeof(RTP_PACKET) + 4 + sizeof(NV_VIDEO_PACKET);
@@ -49,13 +60,94 @@ static int addPacket(uint32_t frame, uint16_t seq, uint32_t fecIndex, uint32_t d
     PNV_VIDEO_PACKET nv = (PNV_VIDEO_PACKET)(buffer + sizeof(RTP_PACKET) + 4);
     nv->streamPacketIndex = LE32(seq);
     nv->frameIndex = LE32(frame);
-    nv->flags = (sof ? FLAG_SOF : 0) | (eof ? FLAG_EOF : 0);
+    nv->flags = (sof ? FLAG_SOF : 0) | (eof ? FLAG_EOF : 0) | FLAG_CONTAINS_PIC_DATA;  // recovered shards are sanity-checked for it
     nv->multiFecFlags = 0x10;
     nv->multiFecBlocks = 0x00;  // block 0 of 1
     nv->fecInfo = LE32((dataPackets << 22) | (fecIndex << 12) | (0u << 4));
     int status = RtpvAddPacket(&queue, rtp, length, (PRTPV_QUEUE_ENTRY)(buffer + length));
     if (status != RTPF_RET_QUEUED) free(buffer);
     return status;
+}
+
+// Builds a shard buffer without submitting it: RTP header, 4-byte extension, NV header, payload.
+static char* buildFecPacket(uint32_t frame, uint16_t seq, uint32_t fecIndex, uint32_t dataPackets, uint32_t fecPercentage, int sof, int eof, int* lengthOut) {
+    const int headerLen = sizeof(RTP_PACKET) + 4 + sizeof(NV_VIDEO_PACKET);
+    const int length = headerLen + PAYLOAD;
+    char* buffer = calloc(1, length + sizeof(RTPV_QUEUE_ENTRY));
+    PRTP_PACKET rtp = (PRTP_PACKET)buffer;
+    rtp->header = FLAG_EXTENSION;
+    rtp->sequenceNumber = seq;
+    PNV_VIDEO_PACKET nv = (PNV_VIDEO_PACKET)(buffer + sizeof(RTP_PACKET) + 4);
+    nv->streamPacketIndex = LE32(seq);
+    nv->frameIndex = LE32(frame);
+    nv->flags = (sof ? FLAG_SOF : 0) | (eof ? FLAG_EOF : 0) | FLAG_CONTAINS_PIC_DATA;  // recovered shards are sanity-checked for it
+    nv->multiFecFlags = 0x10;
+    nv->multiFecBlocks = 0x00;
+    nv->fecInfo = LE32((dataPackets << 22) | (fecIndex << 12) | (fecPercentage << 4));
+    *lengthOut = length;
+    return buffer;
+}
+
+static int submitBuffer(char* buffer, int length) {
+    ((PRTPV_QUEUE_ENTRY)(buffer + length))->receiveTimeUs = 1000;
+    int status = RtpvAddPacket(&queue, (PRTP_PACKET)buffer, length, (PRTPV_QUEUE_ENTRY)(buffer + length));
+    if (status != RTPF_RET_QUEUED) free(buffer);
+    return status;
+}
+
+// A recoverable block: `data` data shards with real Reed-Solomon parity computed the way the
+// host does (over the whole packet, header included; the recovered header fields are patched by
+// the queue). Shards are submitted in `order` (indices into data+parity), skipping `skip`.
+static void deliverRecoverableBlock(uint32_t frame, uint16_t base, unsigned int data, unsigned int percentage,
+                                    const unsigned int* order, unsigned int count, int skip) {
+    const unsigned int parity = (data * percentage + 99) / 100;
+    unsigned char** shards = calloc(data + parity, sizeof(unsigned char*));
+    char** buffers = calloc(data + parity, sizeof(char*));
+    int length = 0;
+    for (unsigned int i = 0; i < data; i++) {
+        buffers[i] = buildFecPacket(frame, (uint16_t)(base + i), i, data, percentage, i == 0, i == data - 1, &length);
+        fillPayload((unsigned char*)buffers[i] + sizeof(RTP_PACKET) + 4 + sizeof(NV_VIDEO_PACKET), (uint16_t)(base + i));
+        shards[i] = (unsigned char*)buffers[i];
+    }
+    for (unsigned int i = data; i < data + parity; i++) {
+        buffers[i] = buildFecPacket(frame, (uint16_t)(base + i), i, data, percentage, 0, 0, &length);
+        shards[i] = (unsigned char*)buffers[i];
+    }
+    reed_solomon* rs = reed_solomon_new(data, parity);
+    assert(rs != NULL);
+    // Parity is computed over the receive size (packetSize + the RTP header) like reconstructFrame's decode.
+    int encodeResult = reed_solomon_encode(rs, shards, data + parity, StreamConfig.packetSize + MAX_RTP_HEADER_SIZE);
+    assert(encodeResult == 0);
+    reed_solomon_release(rs);
+    // The host stamps the RTP header and the FEC bookkeeping fields of each parity shard after
+    // encoding; the queue patches exactly those fields in a recovered packet, so the payload and
+    // the remaining NV header fields (flags, extraFlags, streamPacketIndex) come out of the
+    // Reed-Solomon output unchanged and must be left as encoded here.
+    for (unsigned int i = data; i < data + parity; i++) {
+        int unused;
+        char* header = buildFecPacket(frame, (uint16_t)(base + i), i, data, percentage, 0, 0, &unused);
+        memcpy(buffers[i], header, sizeof(RTP_PACKET) + 4);
+        PNV_VIDEO_PACKET stamped = (PNV_VIDEO_PACKET)(header + sizeof(RTP_PACKET) + 4);
+        PNV_VIDEO_PACKET nv = (PNV_VIDEO_PACKET)(buffers[i] + sizeof(RTP_PACKET) + 4);
+        nv->frameIndex = stamped->frameIndex;
+        nv->multiFecFlags = stamped->multiFecFlags;
+        nv->multiFecBlocks = stamped->multiFecBlocks;
+        nv->fecInfo = stamped->fecInfo;
+        free(header);
+    }
+    unsigned char* submitted = calloc(data + parity, 1);
+    for (unsigned int n = 0; n < count; n++) {
+        unsigned int i = order[n];
+        if ((int)i == skip) continue;
+        submitted[i] = 1;
+        submitBuffer(buffers[i], length);  // frees the buffer itself when the queue rejects it
+    }
+    for (unsigned int i = 0; i < data + parity; i++) {
+        if (!submitted[i]) free(buffers[i]);  // the lost shards never reach the queue
+    }
+    free(submitted);
+    free(shards);
+    free(buffers);
 }
 
 // A shard of a block that declares parity: fecIndex counts data then parity shards.
@@ -69,7 +161,7 @@ static int addFecPacket(uint32_t frame, uint16_t seq, uint32_t fecIndex, uint32_
     PNV_VIDEO_PACKET nv = (PNV_VIDEO_PACKET)(buffer + sizeof(RTP_PACKET) + 4);
     nv->streamPacketIndex = LE32(seq);
     nv->frameIndex = LE32(frame);
-    nv->flags = (sof ? FLAG_SOF : 0) | (eof ? FLAG_EOF : 0);
+    nv->flags = (sof ? FLAG_SOF : 0) | (eof ? FLAG_EOF : 0) | FLAG_CONTAINS_PIC_DATA;  // recovered shards are sanity-checked for it
     nv->multiFecFlags = 0x10;
     nv->multiFecBlocks = 0x00;
     nv->fecInfo = LE32((dataPackets << 22) | (fecIndex << 12) | (fecPercentage << 4));
@@ -182,6 +274,39 @@ int main(void) {
               "complete oversized FEC block: delivered in order without waiting for unusable parity");
         check(queue.pendingFecBlockList.count == 0 && queue.completedFecBlockList.count == 0,
               "complete oversized FEC block: queue ownership is drained");
+    }
+
+    // Real parity recovery through the queue: a lost data shard is rebuilt from a parity shard,
+    // delivered in order with its exact payload, in both arrival orders (the reordered path
+    // stages recovered shards through stageReorderedFecBlock).
+    {
+        const unsigned int ordered[12] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+        const unsigned int reversed[12] = {11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0};
+        for (int rev = 0; rev < 2; rev++) {
+            RtpvCleanupQueue(&queue);
+            RtpvInitializeQueue(&queue);
+            delivered = lostFrames = payloadMismatches = 0;
+            deliveredInOrder = 1;
+            verifyPayload = 1;
+            deliverRecoverableBlock(1, 3000, 8, 50, rev ? reversed : ordered, 12, 3);
+            check(delivered == 8 && deliveredInOrder, rev ? "FEC recovery (reversed arrival): all eight data shards delivered in order"
+                                                          : "FEC recovery (ordered arrival): all eight data shards delivered in order");
+            check(payloadMismatches == 0, rev ? "FEC recovery (reversed arrival): the recovered shard carries its exact payload"
+                                              : "FEC recovery (ordered arrival): the recovered shard carries its exact payload");
+            check(lostFrames == 0 && queue.pendingFecBlockList.count == 0 && queue.completedFecBlockList.count == 0,
+                  rev ? "FEC recovery (reversed arrival): nothing lost, queues drained" : "FEC recovery (ordered arrival): nothing lost, queues drained");
+            verifyPayload = 0;
+        }
+        // Two lost shards with four parity shards also recover; five lost do not.
+        RtpvCleanupQueue(&queue);
+        RtpvInitializeQueue(&queue);
+        delivered = lostFrames = payloadMismatches = 0;
+        deliveredInOrder = 1;
+        verifyPayload = 1;
+        const unsigned int twoLost[10] = {0, 1, 2, 4, 6, 7, 8, 9, 10, 11};  // shards 3 and 5 never arrive
+        deliverRecoverableBlock(1, 4000, 8, 50, twoLost, 10, -1);
+        check(delivered == 8 && deliveredInOrder && payloadMismatches == 0, "FEC recovery: two lost shards are rebuilt from four parity shards");
+        verifyPayload = 0;
     }
 
     RtpvCleanupQueue(&queue);

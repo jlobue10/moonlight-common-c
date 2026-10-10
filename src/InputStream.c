@@ -1025,6 +1025,13 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
         buttonFlags &= 0xFFFF;
     }
 
+    // A negative controller number survives the signed modulus below and would
+    // index the queued-packet table before its start.
+    if (controllerNumber < 0) {
+        LC_ASSERT(controllerNumber >= 0);
+        return -3;
+    }
+
     if (!IS_SUNSHINE()) {
         // GFE only supports a maximum of 4 controllers
         controllerNumber %= 4;
