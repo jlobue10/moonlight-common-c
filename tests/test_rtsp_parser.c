@@ -34,6 +34,7 @@ int main(void) {
                   "the other headers are intact");
         }
         freeMessage(&message);
+        free(buffer);  // the options point into it; freeMessage() frees only the nodes
     }
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;
