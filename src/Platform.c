@@ -1,5 +1,11 @@
 #define _GNU_SOURCE
 #include "Limelight-internal.h"
+
+#if defined(__ANDROID__)
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 #if defined(__vita__)
 #include <pthread.h>
 #include <psp2/kernel/processmgr.h>
@@ -87,6 +93,18 @@ void* ThreadProc(void* context) {
     pthread_setname_np(pthread_self(), ctx->name);
 #elif defined(LC_DARWIN)
     pthread_setname_np(ctx->name);
+#endif
+
+#if defined(__ANDROID__)
+    // The streaming threads otherwise inherit the nice value of whichever Java
+    // thread started the connection (0) and compete with the UI and compositor.
+    // This is what android.os.Process.setThreadPriority(THREAD_PRIORITY_URGENT_DISPLAY)
+    // does for the MediaCodec path; the PyroWave path has no Java decode thread.
+    if (strcmp(ctx->name, "VideoRecv") == 0 || strcmp(ctx->name, "VideoDec") == 0 ||
+            strcmp(ctx->name, "AudioRecv") == 0 || strcmp(ctx->name, "AudioDec") == 0 ||
+            strcmp(ctx->name, "InputSend") == 0) {
+        setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), -8);
+    }
 #endif
 
     ctx->entry(ctx->context);

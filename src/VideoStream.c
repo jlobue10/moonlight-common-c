@@ -261,6 +261,20 @@ static void VideoDecoderThreadProc(void* context) {
             return;
         }
 
+        // PyroWave is intra-only, so a frame that already has a successor queued is
+        // never worth decoding: presenting it only adds its decode time to the latency
+        // of everything behind it. Without this the queue ramps to its 15-frame bound
+        // whenever decode+present runs slower than the frame period, then flushes.
+        if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) {
+            PDECODE_UNIT newer;
+            while (LiPeekNextVideoFrame(&newer)) {
+                LiCompleteVideoFrame(frameHandle, DR_OK);
+                if (!LiWaitForNextVideoFrame(&frameHandle, &decodeUnit)) {
+                    return;
+                }
+            }
+        }
+
         LiCompleteVideoFrame(frameHandle, VideoCallbacks.submitDecodeUnit(decodeUnit));
     }
 }
