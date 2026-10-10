@@ -20,6 +20,28 @@ static bool receivedDataFromPeer;
 static uint64_t firstDataTimeMs;
 static bool receivedFullFrame;
 
+#ifdef LC_WINDOWS
+static volatile LONG skippedVideoFrames;
+#else
+static unsigned int skippedVideoFrames;
+#endif
+
+unsigned int LiGetSkippedVideoFrames(void) {
+#ifdef LC_WINDOWS
+    return (unsigned int)InterlockedCompareExchange(&skippedVideoFrames, 0, 0);
+#else
+    return __atomic_load_n(&skippedVideoFrames, __ATOMIC_RELAXED);
+#endif
+}
+
+static void recordSkippedVideoFrame(void) {
+#ifdef LC_WINDOWS
+    InterlockedIncrement(&skippedVideoFrames);
+#else
+    __atomic_fetch_add(&skippedVideoFrames, 1, __ATOMIC_RELAXED);
+#endif
+}
+
 // We can't request an IDR frame until the depacketizer knows
 // that a packet was lost. This timeout bounds the time that
 // the RTP queue will wait for missing/reordered packets.
@@ -38,6 +60,11 @@ static bool receivedFullFrame;
 
 // Initialize the video stream
 void initializeVideoStream(void) {
+#ifdef LC_WINDOWS
+    InterlockedExchange(&skippedVideoFrames, 0);
+#else
+    __atomic_store_n(&skippedVideoFrames, 0, __ATOMIC_RELAXED);
+#endif
     initializeVideoDepacketizer(StreamConfig.packetSize);
     RtpvInitializeQueue(&rtpQueue);
     decryptionCtx = PltCreateCryptoContext();
@@ -266,12 +293,15 @@ static void VideoDecoderThreadProc(void* context) {
         // of everything behind it. Without this the queue ramps to its 15-frame bound
         // whenever decode+present runs slower than the frame period, then flushes.
         if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) {
+            VIDEO_FRAME_HANDLE newerHandle;
             PDECODE_UNIT newer;
-            while (LiPeekNextVideoFrame(&newer)) {
+            // Poll transfers ownership under the queue lock. A peek is only borrowed
+            // and can be freed by the receiver's overflow flush before validation.
+            while (LiPollNextVideoFrame(&newerHandle, &newer)) {
+                recordSkippedVideoFrame();
                 LiCompleteVideoFrame(frameHandle, DR_OK);
-                if (!LiWaitForNextVideoFrame(&frameHandle, &decodeUnit)) {
-                    return;
-                }
+                frameHandle = newerHandle;
+                decodeUnit = newer;
             }
         }
 
