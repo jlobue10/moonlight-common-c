@@ -89,10 +89,19 @@ int main(void) {
     check(addPacket(3, (uint16_t)(base + big + 1), 1, 2, 0, 1) == RTPF_RET_QUEUED && delivered == 6, "the next frame completes normally");
 
     // Sequence wrap: a block straddling 65535 -> 0 still indexes the bitmap correctly.
-    check(addPacket(4, 65534, 0, 3, 1, 0) == RTPF_RET_QUEUED, "wrap: first shard");
-    check(addPacket(4, 0, 2, 3, 0, 1) == RTPF_RET_QUEUED, "wrap: last shard past the wrap");
-    check(addPacket(4, 0, 2, 3, 0, 1) == RTPF_RET_REJECTED, "wrap: duplicate past the wrap rejected");
-    check(addPacket(4, 65535, 1, 3, 0, 0) == RTPF_RET_QUEUED && delivered == 9, "wrap: middle shard completes the frame");
+    // Sequence numbers only ever climb (a jump backwards is rejected as behind the
+    // window), so walk a fresh queue up to the wrap in steps under 32768.
+    RtpvCleanupQueue(&queue);
+    RtpvInitializeQueue(&queue);
+    check(addPacket(1, 30000, 0, 2, 1, 0) == RTPF_RET_QUEUED && addPacket(1, 30001, 1, 2, 0, 1) == RTPF_RET_QUEUED &&
+          delivered == 8, "wrap: a frame at 30000 is delivered");
+    check(addPacket(2, 60000, 0, 2, 1, 0) == RTPF_RET_QUEUED && addPacket(2, 60001, 1, 2, 0, 1) == RTPF_RET_QUEUED &&
+          delivered == 10, "wrap: a frame at 60000 is delivered");
+    check(addPacket(3, 65534, 0, 3, 1, 0) == RTPF_RET_QUEUED, "wrap: first shard");
+    check(addPacket(3, 0, 2, 3, 0, 1) == RTPF_RET_QUEUED, "wrap: last shard past the wrap");
+    check(addPacket(3, 0, 2, 3, 0, 1) == RTPF_RET_REJECTED, "wrap: duplicate past the wrap rejected");
+    check(addPacket(3, 65535, 1, 3, 0, 0) == RTPF_RET_QUEUED && delivered == 13 && deliveredInOrder,
+          "wrap: middle shard completes the frame in order");
 
     RtpvCleanupQueue(&queue);
     printf("%d checks, %d failures\n", checks, failures);
