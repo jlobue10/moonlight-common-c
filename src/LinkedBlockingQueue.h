@@ -48,3 +48,6 @@ void LbqSignalQueueShutdown(PLINKED_BLOCKING_QUEUE queueHead);
 void LbqSignalQueueDrain(PLINKED_BLOCKING_QUEUE queueHead);
 void LbqSignalQueueUserWake(PLINKED_BLOCKING_QUEUE queueHead);
 int LbqGetItemCount(PLINKED_BLOCKING_QUEUE queueHead);
+// The caller must keep entry alive while checking. Useful for coalescing only
+// adjacent packets, without moving input across another queued event.
+bool LbqIsQueueTail(PLINKED_BLOCKING_QUEUE queueHead, PLINKED_BLOCKING_QUEUE_ENTRY entry);
