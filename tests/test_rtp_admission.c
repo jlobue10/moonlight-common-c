@@ -77,6 +77,8 @@ static int addFecPacket(uint32_t frame, uint16_t seq, uint32_t fecIndex, uint32_
 int main(void) {
     memcpy(AppVersionQuad, (int[]){7, 1, 431, 0}, sizeof(AppVersionQuad));  // multi-FEC capable host
     StreamConfig.packetSize = PAYLOAD + sizeof(NV_VIDEO_PACKET);  // counted from the end of the RTP header, as the host sets it
+    // The platform clock counts from its first call; debug builds assert a non-zero block receive time.
+    while (PltGetMicroseconds() == 0) {}
     RtpvInitializeQueue(&queue);
 
     // Frame 1: four shards, the third arrives twice and after the fourth.
