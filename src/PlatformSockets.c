@@ -439,7 +439,10 @@ SOCKET createSocket(int addressFamily, int socketType, int protocol, bool nonBlo
 
     s = socket(addressFamily, socketType, protocol);
     if (s == INVALID_SOCKET) {
-        Limelog("socket() failed: %d\n", (int)LastSocketError());
+        // The log callback is client code; keep the error for the caller
+        int err = (int)LastSocketError();
+        Limelog("socket() failed: %d\n", err);
+        SetLastSocketError(err);
         return INVALID_SOCKET;
     }
 

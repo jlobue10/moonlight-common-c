@@ -381,7 +381,10 @@ int startVideoStream(void* rendererContext, int drFlags) {
                               SOCK_QOS_TYPE_VIDEO);
     if (rtpSocket == INVALID_SOCKET) {
         VideoCallbacks.cleanup();
-        return LastSocketError();
+        // LastSocketFail(): a zero error code would record this stage as started
+        // and the teardown would then stop and clean up a decoder that was never
+        // started and join threads that were never created.
+        return LastSocketFail();
     }
 
     VideoCallbacks.start();
@@ -423,7 +426,7 @@ int startVideoStream(void* rendererContext, int drFlags) {
             }
             closeSocket(rtpSocket);
             VideoCallbacks.cleanup();
-            return LastSocketError();
+            return LastSocketFail();
         }
     }
 

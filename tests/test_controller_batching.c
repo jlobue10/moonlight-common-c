@@ -80,6 +80,43 @@ int main(void) {
     check(sends == 3 && LE16(sent[1].buttonFlags) == A_FLAG,
           "button transitions retain their existing ordering");
 
+    // A holder the sender has already latched (currentQueuedControllerPacket cleared
+    // under batchedInputMutex while the holder is being sent) must not be batched
+    // into: the next state goes into a new holder even without a discrete edge.
+    sendState(80, 0, 10, 0);
+    PltLockMutex(&batchedInputMutex);
+    currentQueuedControllerPacket[0] = NULL;
+    PltUnlockMutex(&batchedInputMutex);
+    sendState(90, 0, 20, 0);
+    drain();
+    check(sends == 2 && sent[0].leftTrigger == 80 && sent[1].leftTrigger == 90,
+          "a holder the sender has latched is not coalesced into");
+
+    // The same edge rules on the GFE branch of the comparison (buttonFlags2 forced
+    // to zero, controller number modulo 4).
+    memcpy(AppVersionQuad, (int[]){7, 1, 431, 0}, sizeof(AppVersionQuad));
+    sendState(0, 0, 0, 0);
+    sendState(255, 0, 100, 0);
+    sendState(0, 0, 200, 0);
+    drain();
+    check(sends == 3 && sent[0].leftTrigger == 0 && sent[1].leftTrigger == 255 && sent[2].leftTrigger == 0,
+          "GFE: left trigger tap retains rest, press, release");
+    sendState(239, 0, 0, 0);
+    sendState(240, 0, 0, 0);
+    sendState(239, 0, 0, 0);
+    drain();
+    check(sends == 3 && sent[1].leftTrigger == 240, "GFE: the 0xF0 click edge is retained");
+    sendState(80, 0, 100, 0);
+    sendState(220, 0, 300, 0);
+    drain();
+    check(sends == 1 && sent[0].leftTrigger == 220, "GFE: continuous travel coalesces");
+    sendState(20, 0, 10, 0);
+    sendState(20, 0, 20, A_FLAG);
+    sendState(20, 0, 30, 0);
+    drain();
+    check(sends == 3 && LE16(sent[1].buttonFlags) == A_FLAG && sent[1].buttonFlags2 == 0,
+          "GFE: button transitions are retained with buttonFlags2 zero");
+
     initialized = false;
     LbqSignalQueueShutdown(&packetHolderFreeList);
     LbqSignalQueueShutdown(&packetQueue);

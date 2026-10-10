@@ -616,6 +616,14 @@ static void inputSendThreadProc(void* context) {
                 i += codePointLength;
             }
 
+            if (i > 0 && i < totalLength) {
+                // The loop stopped early (truncated or invalid trailing bytes, or an
+                // interrupt) after sending a code point with moreData set, which left it
+                // in ENet's outgoing queue until the receive thread next services the
+                // host. Push it out now.
+                flushInputOnControlStream();
+            }
+
             freePacketHolder(holder);
             continue;
         }

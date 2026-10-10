@@ -55,7 +55,12 @@ int main(void) {
     check(sends == 1 && more[0] == 0, "a single multi-byte code point is sent once and flushed");
 
     runText("a\xE2\x82", 3);  // truncated 3-byte sequence
-    check(sends == 1 && more[0] == 1, "a truncated trailing code point is not sent");
+    check(sends == 1 && more[0] == 1 && flushes == 2,
+          "a truncated trailing code point is not sent and the sent prefix is flushed");
+
+    runText("a\xFF", 2);  // invalid lead byte after a valid code point
+    check(sends == 1 && more[0] == 1 && flushes == 2,
+          "an invalid lead byte stops the chunker and the sent prefix is flushed");
 
     runText("\xC3", 1);
     check(sends == 0, "a lone lead byte sends nothing");
