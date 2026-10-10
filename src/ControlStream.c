@@ -111,6 +111,40 @@ static bool encryptedControlStream;
 static bool hdrEnabled;
 static SS_HDR_METADATA hdrMetadata;
 
+// Process-lifetime lock: HDR queries are valid before the first connection and
+// retain the last reported state after teardown. Only a fixed-size copy is made
+// while held; parsing, callbacks, allocation and network work remain outside.
+#if defined(LC_WINDOWS)
+static volatile LONG hdrStateLock;
+#else
+static volatile int hdrStateLock;
+#endif
+
+static void lockHdrState(void) {
+#if defined(LC_WINDOWS)
+    while (InterlockedCompareExchange(&hdrStateLock, 1, 0) != 0) {
+#else
+    while (__atomic_exchange_n(&hdrStateLock, 1, __ATOMIC_ACQUIRE) != 0) {
+#endif
+        PltSleepMs(0);
+    }
+}
+
+static void unlockHdrState(void) {
+#if defined(LC_WINDOWS)
+    InterlockedExchange(&hdrStateLock, 0);
+#else
+    __atomic_store_n(&hdrStateLock, 0, __ATOMIC_RELEASE);
+#endif
+}
+
+static void publishHdrState(bool enabled, const SS_HDR_METADATA* metadata) {
+    lockHdrState();
+    hdrMetadata = *metadata;
+    hdrEnabled = enabled;
+    unlockHdrState();
+}
+
 static int intervalGoodFrameCount;
 static int intervalTotalFrameCount;
 static uint64_t intervalStartTimeMs;
@@ -338,8 +372,9 @@ int initializeControlStream(void) {
     LbqInitializeLinkedBlockingQueue(&frameFecStatusQueue, 8); // Limits number of frame status reports per periodic ping interval
     // Steam haptic reports are queued one per packet (a stop must not be coalesced
     // away), so a burst of UI clicks needs more headroom than rumble/LED callbacks.
-    // Seven explicit stop keys per controller (16 * 7 = 112), plus ordinary feedback.
-    LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 128);
+    // 16 * (7 raw states/stops + 8 conventional states) + HDR = 241 state keys.
+    // Ordinary haptic events have a separate 32-entry limit.
+    LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 256);
     PltCreateMutex(&enetMutex);
 
     encryptedControlStream = APP_VERSION_AT_LEAST(7, 1, 431);
@@ -390,8 +425,8 @@ int initializeControlStream(void) {
     usePeriodicPing = APP_VERSION_AT_LEAST(7, 1, 415);
     encryptionCtx = PltCreateCryptoContext();
     decryptionCtx = PltCreateCryptoContext();
-    hdrEnabled = false;
-    memset(&hdrMetadata, 0, sizeof(hdrMetadata));
+    const SS_HDR_METADATA emptyHdrMetadata = {0};
+    publishHdrState(false, &emptyHdrMetadata);
 
     return 0;
 }
@@ -982,7 +1017,7 @@ static void asyncCallbackThreadFunc(void* context) {
             break;
         case IDX_HDR_INFO:
             // HDR state is maintained globally, so we just invoke the client callback here.
-            ListenerCallbacks.setHdrMode(hdrEnabled);
+            ListenerCallbacks.setHdrMode(LiGetCurrentHostDisplayHdrMode());
             break;
 
         case IDX_SET_MOTION_EVENT:
@@ -1000,8 +1035,8 @@ static void asyncCallbackThreadFunc(void* context) {
                                                   queuedCb->data.dsAdaptiveTrigger.right);
             break;
         case IDX_STEAM_HAPTIC:
-            // Repeated effects are not batched. Explicit stops alone may be coalesced
-            // at insertion, retaining their order against intervening effects.
+            // Pulses/commands remain events; 0x80 state and explicit stops may be
+            // coalesced at insertion, after intervening effects.
             ListenerCallbacks.steamHaptic(queuedCb->data.steamHaptic.controllerNumber,
                                           queuedCb->data.steamHaptic.length,
                                           queuedCb->data.steamHaptic.report);
@@ -1042,16 +1077,40 @@ static unsigned steam_haptic_stop_key(const unsigned char *report, unsigned leng
     return 0;
 }
 
-static bool isSteamHapticStop(void* value) {
+static uint32_t asyncCallbackStateKey(void* value) {
     PQUEUED_ASYNC_CALLBACK cb = value;
-    return cb->typeIndex == IDX_STEAM_HAPTIC &&
-        steam_haptic_stop_key(cb->data.steamHaptic.report, cb->data.steamHaptic.length) != 0;
+    unsigned controller = 0, subkey = 0;
+    switch (cb->typeIndex) {
+    case IDX_RUMBLE_DATA: controller = cb->data.rumble.controllerNumber; break;
+    case IDX_RUMBLE_TRIGGER_DATA: controller = cb->data.rumbleTriggers.controllerNumber; break;
+    case IDX_SET_RGB_LED: controller = cb->data.setControllerLed.controllerNumber; break;
+    case IDX_SET_MOTION_EVENT:
+        controller = cb->data.setMotionEventState.controllerNumber;
+        subkey = cb->data.setMotionEventState.motionType;
+        if (subkey != 1 && subkey != 2) return 0;
+        break;
+    case IDX_DS_ADAPTIVE_TRIGGERS:
+        controller = cb->data.dsAdaptiveTrigger.controllerNumber;
+        subkey = cb->data.dsAdaptiveTrigger.eventFlags & (DS_EFFECT_LEFT_TRIGGER | DS_EFFECT_RIGHT_TRIGGER);
+        if (subkey == 0) return 0;
+        break;
+    case IDX_STEAM_HAPTIC:
+        controller = cb->data.steamHaptic.controllerNumber;
+        subkey = cb->data.steamHaptic.length >= 10 && cb->data.steamHaptic.report[0] == 0x80 ? (0x80u << 2) | 3 :
+            steam_haptic_stop_key(cb->data.steamHaptic.report, cb->data.steamHaptic.length);
+        if (subkey == 0) return 0;
+        break;
+    case IDX_HDR_INFO: break;
+    default: return 0;
+    }
+    if (controller >= 16) return 0;
+    return ((uint32_t)(cb->typeIndex + 1) << 24) | (controller << 16) | subkey;
 }
-static bool sameSteamHapticStop(void* a, void* b) {
-    PQUEUED_ASYNC_CALLBACK x = a, y = b;
-    return isSteamHapticStop(b) && x->data.steamHaptic.controllerNumber == y->data.steamHaptic.controllerNumber &&
-        steam_haptic_stop_key(x->data.steamHaptic.report, x->data.steamHaptic.length) ==
-        steam_haptic_stop_key(y->data.steamHaptic.report, y->data.steamHaptic.length);
+
+static bool isCallbackState(void* value) { return asyncCallbackStateKey(value) != 0; }
+static bool sameCallbackState(void* a, void* b) {
+    uint32_t key = asyncCallbackStateKey(a);
+    return key != 0 && key == asyncCallbackStateKey(b);
 }
 
 static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLength) {
@@ -1134,12 +1193,38 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
 
     void* displaced = NULL;
     err = LbqOfferQueueItemPriority(&asyncCallbackQueue, queuedCb, &queuedCb->entry,
-        sameSteamHapticStop, isSteamHapticStop, &displaced);
+        sameCallbackState, isCallbackState, 32, &displaced);
     free(displaced);
     if (err != LBQ_SUCCESS) {
         Limelog("Failed to queue async callback: %d\n", err);
         free(queuedCb);
     }
+}
+
+static void updateHdrState(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLength) {
+    BYTE_BUFFER bb;
+    uint8_t enableByte;
+    SS_HDR_METADATA metadata = {0};
+
+    BbInitializeWrappedBuffer(&bb, (char*)ctlHdr, sizeof(*ctlHdr), packetLength - sizeof(*ctlHdr), BYTE_ORDER_LITTLE);
+
+    BbGet8(&bb, &enableByte);
+    if (IS_SUNSHINE()) {
+        // Sunshine sends HDR metadata in this message too
+        for (int i = 0; i < 3; i++) {
+            BbGet16(&bb, &metadata.displayPrimaries[i].x);
+            BbGet16(&bb, &metadata.displayPrimaries[i].y);
+        }
+        BbGet16(&bb, &metadata.whitePoint.x);
+        BbGet16(&bb, &metadata.whitePoint.y);
+        BbGet16(&bb, &metadata.maxDisplayLuminance);
+        BbGet16(&bb, &metadata.minDisplayLuminance);
+        BbGet16(&bb, &metadata.maxContentLightLevel);
+        BbGet16(&bb, &metadata.maxFrameAverageLightLevel);
+        BbGet16(&bb, &metadata.maxFullFrameLuminance);
+    }
+
+    publishHdrState(enableByte != 0, &metadata);
 }
 
 static void controlReceiveThreadFunc(void* context) {
@@ -1306,31 +1391,7 @@ static void controlReceiveThreadFunc(void* context) {
             // Process HDR data immediately to update global HDR enabled state and HDR metadata.
             // The actual client callback will be invoked in the async callback thread.
             if (ctlHdr->type == packetTypes[IDX_HDR_INFO]) {
-                BYTE_BUFFER bb;
-                uint8_t enableByte;
-
-                BbInitializeWrappedBuffer(&bb, (char*)ctlHdr, sizeof(*ctlHdr), packetLength - sizeof(*ctlHdr), BYTE_ORDER_LITTLE);
-
-                BbGet8(&bb, &enableByte);
-                if (IS_SUNSHINE()) {
-                    // Zero the metadata buffer to properly handle older servers if we have to add new fields
-                    memset(&hdrMetadata, 0, sizeof(hdrMetadata));
-
-                    // Sunshine sends HDR metadata in this message too
-                    for (int i = 0; i < 3; i++) {
-                        BbGet16(&bb, &hdrMetadata.displayPrimaries[i].x);
-                        BbGet16(&bb, &hdrMetadata.displayPrimaries[i].y);
-                    }
-                    BbGet16(&bb, &hdrMetadata.whitePoint.x);
-                    BbGet16(&bb, &hdrMetadata.whitePoint.y);
-                    BbGet16(&bb, &hdrMetadata.maxDisplayLuminance);
-                    BbGet16(&bb, &hdrMetadata.minDisplayLuminance);
-                    BbGet16(&bb, &hdrMetadata.maxContentLightLevel);
-                    BbGet16(&bb, &hdrMetadata.maxFrameAverageLightLevel);
-                    BbGet16(&bb, &hdrMetadata.maxFullFrameLuminance);
-                }
-
-                hdrEnabled = (enableByte != 0);
+                updateHdrState(ctlHdr, packetLength);
             }
 
             // Process client callbacks in a separate thread
@@ -2114,16 +2175,19 @@ int startControlStream(void) {
 }
 
 bool LiGetCurrentHostDisplayHdrMode(void) {
-    return hdrEnabled;
+    lockHdrState();
+    bool enabled = hdrEnabled;
+    unlockHdrState();
+    return enabled;
 }
 
 bool LiGetHdrMetadata(PSS_HDR_METADATA metadata) {
-    if (!IS_SUNSHINE() || !hdrEnabled) {
-        return false;
-    }
-
-    *metadata = hdrMetadata;
-    return true;
+    if (!IS_SUNSHINE()) return false;
+    lockHdrState();
+    bool enabled = hdrEnabled;
+    if (enabled) *metadata = hdrMetadata;
+    unlockHdrState();
+    return enabled;
 }
 
 // Send a server cmd request to the streaming machine

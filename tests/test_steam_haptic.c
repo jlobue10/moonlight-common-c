@@ -33,7 +33,7 @@ int main(void) {
     packet.bytes[2] = 7;
     packet.bytes[5] = 0x81;
     int failures = 0;
-    if (LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 128) != 0) return 2;
+    if (LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 256) != 0) return 2;
     for (int declared = 0; declared <= 255; ++declared) {
         packet.bytes[4] = (unsigned char)declared;
         for (int length = sizeof(packet.header); length <= sizeof(packet.bytes); ++length) {
@@ -50,24 +50,48 @@ int main(void) {
             free(value);
         }
     }
-    for (int i = 0; i < 128; ++i) send_haptic(15, 0x81, 0, false);
+    for (int i = 0; i < 256; ++i) send_haptic(15, 0x81, 0, false);
     for (int id = 0; id < 16; ++id) {
         send_haptic(id, 0x80, 0, true);
         for (int type = 0x81; type <= 0x82; ++type) {
             for (int side = 0; side < 3; ++side) send_haptic(id, type, side, true);
         }
     }
+    for (int id = 0; id < 16; ++id) {
+        for (int kind = 0; kind < 8; ++kind) {
+            PQUEUED_ASYNC_CALLBACK cb = calloc(1, sizeof(*cb));
+            if (cb == NULL) return 2;
+            if (kind == 0) { cb->typeIndex = IDX_RUMBLE_DATA; cb->data.rumble.controllerNumber = id; }
+            else if (kind == 1) { cb->typeIndex = IDX_RUMBLE_TRIGGER_DATA; cb->data.rumbleTriggers.controllerNumber = id; }
+            else if (kind == 2) { cb->typeIndex = IDX_SET_RGB_LED; cb->data.setControllerLed.controllerNumber = id; }
+            else if (kind < 5) { cb->typeIndex = IDX_SET_MOTION_EVENT; cb->data.setMotionEventState.controllerNumber = id; cb->data.setMotionEventState.motionType = kind - 2; }
+            else { cb->typeIndex = IDX_DS_ADAPTIVE_TRIGGERS; cb->data.dsAdaptiveTrigger.controllerNumber = id; cb->data.dsAdaptiveTrigger.eventFlags = 4 * (kind - 4); }
+            void* old = NULL;
+            if (LbqOfferQueueItemPriority(&asyncCallbackQueue, cb, &cb->entry, sameCallbackState, isCallbackState, 32, &old) != LBQ_SUCCESS) { free(cb); ++failures; }
+            free(old);
+        }
+    }
+    {
+        PQUEUED_ASYNC_CALLBACK cb = calloc(1, sizeof(*cb)); cb->typeIndex = IDX_HDR_INFO;
+        void* old = NULL;
+        if (LbqOfferQueueItemPriority(&asyncCallbackQueue, cb, &cb->entry, sameCallbackState, isCallbackState, 32, &old) != LBQ_SUCCESS) { free(cb); ++failures; }
+        free(old);
+    }
     for (int i = 0; i < 1000; ++i) send_haptic(15, 0x81, 0, false);
-    int stops = 0;
+    int stops = 0, states = 0, events = 0, total = 0;
     void* value = NULL;
     while (LbqPollQueueElement(&asyncCallbackQueue, &value) == LBQ_SUCCESS) {
         PQUEUED_ASYNC_CALLBACK cb = value;
+        ++total;if (isCallbackState(cb)) ++states; else ++events;
         const unsigned char* report = cb->data.steamHaptic.report;
-        if (report[2] == 0 && report[4] == 0 && report[6] == 0 && report[7] == 0) ++stops;
+        if (cb->typeIndex == IDX_STEAM_HAPTIC && report[2] == 0 && report[4] == 0 && report[6] == 0 && report[7] == 0) ++stops;
         free(value);
     }
     printf("%s full callback queue admits all 112 family/actuator stops (%d delivered)\n", stops == 112 ? "PASS" : "FAIL", stops);
     failures += stops != 112;
+    bool retained = states == 241 && events <= 32 && total <= 256;
+    printf("%s mixed feedback retains 241 state keys; %d transient events (%d total)\n", retained ? "PASS" : "FAIL", events, total);
+    failures += !retained;
     send_haptic(0, 0x82, 1, true); send_haptic(0, 0x82, 1, false); send_haptic(0, 0x82, 1, true);
     int count = 0, commands[3] = {-1, -1, -1};
     while (LbqPollQueueElement(&asyncCallbackQueue, &value) == LBQ_SUCCESS) {
@@ -85,7 +109,9 @@ int main(void) {
         if (cb == NULL) return 2;
         cb->typeIndex = IDX_RUMBLE_DATA;
         cb->data.rumble.controllerNumber = i % 16;
-        if (LbqOfferQueueItem(&asyncCallbackQueue, cb, &cb->entry) != LBQ_SUCCESS) free(cb);
+        void* old = NULL;
+        if (LbqOfferQueueItemPriority(&asyncCallbackQueue, cb, &cb->entry, sameCallbackState, isCallbackState, 32, &old) != LBQ_SUCCESS) free(cb);
+        free(old);
         send_haptic(i % 16, 0x82, i % 3, true);
     }
     LbqSignalQueueDrain(&asyncCallbackQueue);

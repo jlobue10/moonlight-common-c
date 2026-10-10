@@ -83,11 +83,11 @@ int LbqGetItemCount(PLINKED_BLOCKING_QUEUE queueHead) {
 }
 
 int LbqOfferQueueItem(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINKED_BLOCKING_QUEUE_ENTRY entry) {
-    return LbqOfferQueueItemPriority(queueHead, data, entry, NULL, NULL, NULL);
+    return LbqOfferQueueItemPriority(queueHead, data, entry, NULL, NULL, 0, NULL);
 }
 
 int LbqOfferQueueItemPriority(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINKED_BLOCKING_QUEUE_ENTRY entry,
-        bool (*matches)(void*, void*), bool (*priority)(void*), void** displaced) {
+        bool (*matches)(void*, void*), bool (*priority)(void*), int eventLimit, void** displaced) {
     bool wasEmpty;
     if (displaced != NULL) *displaced = NULL;
     
@@ -101,17 +101,19 @@ int LbqOfferQueueItemPriority(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLIN
         return LBQ_INTERRUPTED;
     }
 
-    if (priority != NULL && priority(data)) {
-        PLINKED_BLOCKING_QUEUE_ENTRY victim = NULL;
-        // Move an equivalent stop to the tail; never move it ahead of an effect.
+    if (priority != NULL) {
+        PLINKED_BLOCKING_QUEUE_ENTRY victim = NULL, firstEvent = NULL;
+        bool important = priority(data);
+        int events = 0;
         for (PLINKED_BLOCKING_QUEUE_ENTRY p = queueHead->head; p != NULL; p = p->flink) {
-            if (matches(data, p->data)) { victim = p; break; }
-        }
-        if (victim == NULL && queueHead->currentSize == queueHead->sizeBound) {
-            for (PLINKED_BLOCKING_QUEUE_ENTRY p = queueHead->head; p != NULL; p = p->flink) {
-                if (!priority(p->data)) { victim = p; break; }
+            if (important && matches(data, p->data)) victim = p;
+            if (!priority(p->data)) {
+                if (firstEvent == NULL) firstEvent = p;
+                ++events;
             }
         }
+        if (victim == NULL && (queueHead->currentSize == queueHead->sizeBound ||
+                (!important && eventLimit > 0 && events >= eventLimit))) victim = firstEvent;
         if (victim != NULL) {
             if (victim->blink) victim->blink->flink = victim->flink;
             else queueHead->head = victim->flink;

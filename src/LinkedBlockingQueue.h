@@ -33,8 +33,9 @@ int LbqOfferQueueItem(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINKED_BLOC
 // Optional priority admission. Both predicates execute under the queue lock;
 // provide a non-null displaced output when priority is enabled. The caller owns
 // displaced data. Consumers must use atomic polls, not borrowed peeks.
+// A positive eventLimit bounds non-priority items separately from state capacity.
 int LbqOfferQueueItemPriority(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINKED_BLOCKING_QUEUE_ENTRY entry,
-    bool (*matches)(void*, void*), bool (*priority)(void*), void** displaced);
+    bool (*matches)(void*, void*), bool (*priority)(void*), int eventLimit, void** displaced);
 int LbqWaitForQueueElement(PLINKED_BLOCKING_QUEUE queueHead, void** data);
 int LbqPollQueueElement(PLINKED_BLOCKING_QUEUE queueHead, void** data);
 // Predicate executes under the queue lock; only a matching head is removed.
