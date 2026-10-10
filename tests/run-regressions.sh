@@ -23,3 +23,4 @@ done
 "$build/test-video_drain" flush
 "$build/test-video_drain" av1
 "$build/test-video-format"
+python3 "$repo/tests/test_server_commands.py"
