@@ -515,13 +515,19 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
             nalChainDataLength = 0;
 
             if ((VideoCallbacks.capabilities & CAPABILITY_DIRECT_SUBMIT) == 0) {
-                if (LbqOfferQueueItem(&decodeUnitQueue, qdu, &qdu->entry) == LBQ_BOUND_EXCEEDED) {
-                    Limelog("Video decode unit queue overflow\n");
+                int err = LbqOfferQueueItem(&decodeUnitQueue, qdu, &qdu->entry);
+                if (err != LBQ_SUCCESS) {
+                    if (err == LBQ_BOUND_EXCEEDED) {
+                        Limelog("Video decode unit queue overflow\n");
 
-                    // RFI recovery is not supported here
-                    waitingForIdrFrame = true;
+                        // RFI recovery is not supported here
+                        waitingForIdrFrame = true;
+                    }
 
-                    // Clear NAL state for the frame that we failed to enqueue
+                    // Clear NAL state for the frame that we failed to enqueue. This also
+                    // covers LBQ_INTERRUPTED: stopVideoDepacketizer() shuts the queue down
+                    // before the receive thread is interrupted, and a frame completed in
+                    // that window used to leak its whole buffer chain (~1.5 MB for PyroWave).
                     nalChainHead = qdu->decodeUnit.bufferList;
                     nalChainDataLength = qdu->decodeUnit.fullLength;
                     dropFrameState();
@@ -529,11 +535,13 @@ static void reassembleFrame(int frameNumber, bool frameIsLTR) {
                     // Free the DU we were going to queue
                     free(qdu);
 
-                    // Free all frames in the decode unit queue
-                    freeDecodeUnitList(LbqFlushQueueItems(&decodeUnitQueue));
+                    if (err == LBQ_BOUND_EXCEEDED) {
+                        // Free all frames in the decode unit queue
+                        freeDecodeUnitList(LbqFlushQueueItems(&decodeUnitQueue));
 
-                    // Request an IDR frame to recover
-                    LiRequestIdrFrame();
+                        // Request an IDR frame to recover
+                        LiRequestIdrFrame();
+                    }
                     return;
                 }
             }

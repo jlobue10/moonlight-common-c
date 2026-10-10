@@ -110,45 +110,37 @@ static void reportFinalFrameFecStatus(PRTP_VIDEO_QUEUE queue) {
 
 // newEntry is contained within the packet buffer so we free the whole entry by freeing entry->packet
 static bool queuePacket(PRTP_VIDEO_QUEUE queue, PRTPV_QUEUE_ENTRY newEntry, PRTP_PACKET packet, int length, bool isParity, bool isFecRecovery) {
-    PRTPV_QUEUE_ENTRY entry;
     bool outOfSequence;
 
     LC_ASSERT(!(isFecRecovery && isParity));
     LC_ASSERT(!isBefore16(packet->sequenceNumber, queue->nextContiguousSequenceNumber));
 
-    // If the packet is in order, we can take the fast path and avoid having
-    // to loop through the whole list. If we get an out of order or missing
-    // packet, the fast path will stop working and we'll use the loop instead.
-    //
-    // NB: It's not enough to just check next contiguous sequence number because
-    // it's possible that we hit the OOS path earlier which doesn't update the
-    // next contiguous sequence number. If that happens, we need to use the slow
-    // path for this entire frame to avoid possibly mishandling a duplicate packet.
-    if (queue->useFastQueuePath && packet->sequenceNumber == queue->nextContiguousSequenceNumber) {
-        queue->nextContiguousSequenceNumber = U16(packet->sequenceNumber + 1);
-        outOfSequence = false;
-    }
-    else {
-        outOfSequence = false;
-
-        // Check for duplicates
-        entry = queue->pendingFecBlockList.head;
-        while (entry != NULL) {
-            if (packet->sequenceNumber == entry->packet->sequenceNumber) {
-                return false;
-            }
-            else if (isBefore16(packet->sequenceNumber, entry->packet->sequenceNumber)) {
-                outOfSequence = true;
-            }
-
-            entry = entry->next;
+    // Duplicate detection by bitmap, not by walking pendingFecBlockList: the caller
+    // has already bounded the sequence number to [bufferLowest, bufferHighest], so
+    // the offset indexes the block's bitmap directly. (The walk cost O(n) per packet
+    // for the rest of a block once one packet was lost; with PyroWave's ~1000-shard
+    // blocks that was ~500k node visits per lossy block on the receive thread.)
+    {
+        const uint32_t index = U16(packet->sequenceNumber - queue->bufferLowestSequenceNumber);
+        LC_ASSERT(index < sizeof(queue->receivedBitmap) * 8);
+        if (index >= sizeof(queue->receivedBitmap) * 8 ||
+                (queue->receivedBitmap[index >> 3] & (uint8_t)(1u << (index & 7)))) {
+            return false;
         }
-
-        // If we make it here, we cannot use the fast queue path for this frame because
-        // we're about to queue a non-duplicate packet out of order. This will not update
-        // nextContiguousSequenceNumber which the fast path relies on.
-        queue->useFastQueuePath = false;
+        queue->receivedBitmap[index >> 3] |= (uint8_t)(1u << (index & 7));
     }
+
+    // The contiguous prefix only grows when the next expected packet arrives; a
+    // hole stops it, which is what the "behind our window" rejection relies on.
+    if (packet->sequenceNumber == queue->nextContiguousSequenceNumber) {
+        queue->nextContiguousSequenceNumber = U16(packet->sequenceNumber + 1);
+    }
+
+    // Out of sequence means behind a packet we already have. The highest received
+    // sequence number is maintained by RtpvAddPacket after this returns, so on the
+    // block's first packet it still holds the previous block's value: ignore it then.
+    outOfSequence = queue->pendingFecBlockList.count != 0 &&
+                    isBefore16(packet->sequenceNumber, queue->receivedHighestSequenceNumber);
 
     newEntry->packet = packet;
     newEntry->length = length;
@@ -704,7 +696,7 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
         queue->receivedParityPackets = 0;
         queue->receivedHighestSequenceNumber = 0;
         queue->missingPackets = 0;
-        queue->useFastQueuePath = true;
+        memset(queue->receivedBitmap, 0, sizeof(queue->receivedBitmap));
         queue->reportedLostFrame = false;
         queue->bufferDataPackets = (nvPacket->fecInfo & 0xFFC00000) >> 22;
         queue->fecPercentage = (nvPacket->fecInfo & 0xFF0) >> 4;
