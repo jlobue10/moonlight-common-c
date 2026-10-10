@@ -455,64 +455,62 @@ cleanup:
     return ret;
 }
 
-static void stageCompleteFecBlock(PRTP_VIDEO_QUEUE queue) {
-    unsigned int nextSeqNum = queue->bufferLowestSequenceNumber;
+// Only needed when the receive order differs from wire sequence order. The
+// 10-bit data-shard count limits this table to 1023 entries (8 KiB on 64-bit).
+// Indexing relative to the block base also handles 16-bit sequence wrap.
+static void stageReorderedFecBlock(PRTP_VIDEO_QUEUE queue) {
+    PRTPV_QUEUE_ENTRY ordered[1023];
+    LC_ASSERT(queue->bufferDataPackets <= 1023);
+    memset(ordered, 0, queue->bufferDataPackets * sizeof(ordered[0]));
 
-    while (queue->pendingFecBlockList.count > 0) {
+    while (queue->pendingFecBlockList.head != NULL) {
         PRTPV_QUEUE_ENTRY entry = queue->pendingFecBlockList.head;
-
-        unsigned int lowestRtpSequenceNumber = entry->packet->sequenceNumber;
-
-        do {
-            // We should never encounter a packet that's lower than our next seq num
-            LC_ASSERT(!isBefore16(entry->packet->sequenceNumber, nextSeqNum));
-
-            // Never return parity packets
-            if (entry->isParity) {
-                PRTPV_QUEUE_ENTRY parityEntry = entry;
-
-                // Skip this entry
-                entry = parityEntry->next;
-
-                // Remove this entry
-                removeEntryFromList(&queue->pendingFecBlockList, parityEntry);
-
-                // Free the entry and packet
-                free(parityEntry->packet);
-
-                continue;
-            }
-
-            // Check for the next packet in sequence. This will be O(1) for non-reordered packet streams.
-            if (entry->packet->sequenceNumber == nextSeqNum) {
-                removeEntryFromList(&queue->pendingFecBlockList, entry);
-
-                // To avoid having to sample the system time for each packet, we cheat
-                // and use the first packet's receive time for all packets. This ends up
-                // actually being better for the measurements that the depacketizer does,
-                // since it properly handles out of order packets.
-                LC_ASSERT(queue->bufferFirstRecvTimeUs != 0);
-                entry->receiveTimeUs = queue->bufferFirstRecvTimeUs;
-
-                // Move this packet to the completed FEC block list
-                insertEntryIntoList(&queue->completedFecBlockList, entry);
-                break;
-            }
-            else if (isBefore16(entry->packet->sequenceNumber, lowestRtpSequenceNumber)) {
-                lowestRtpSequenceNumber = entry->packet->sequenceNumber;
-            }
-
-            entry = entry->next;
-        } while (entry != NULL);
-
-        if (entry == NULL) {
-            // Start at the lowest we found last enumeration
-            nextSeqNum = lowestRtpSequenceNumber;
+        removeEntryFromList(&queue->pendingFecBlockList, entry);
+        if (entry->isParity) {
+            free(entry->packet);
         }
         else {
-            // We found this packet so move on to the next one in sequence
-            nextSeqNum = U16(nextSeqNum + 1);
+            unsigned int index = U16(entry->packet->sequenceNumber - queue->bufferLowestSequenceNumber);
+            // Admission/recovery bounds data to this block and rejects duplicates.
+            LC_ASSERT(index < queue->bufferDataPackets);
+            LC_ASSERT(ordered[index] == NULL);
+            ordered[index] = entry;
         }
+    }
+
+    for (unsigned int i = 0; i < queue->bufferDataPackets; i++) {
+        if (ordered[i] != NULL) {
+            ordered[i]->receiveTimeUs = queue->bufferFirstRecvTimeUs;
+            insertEntryIntoList(&queue->completedFecBlockList, ordered[i]);
+        }
+    }
+}
+
+static void stageCompleteFecBlock(PRTP_VIDEO_QUEUE queue) {
+    unsigned int nextSeqNum = queue->bufferLowestSequenceNumber;
+    LC_ASSERT(queue->bufferFirstRecvTimeUs != 0);
+
+    while (queue->pendingFecBlockList.head != NULL) {
+        PRTPV_QUEUE_ENTRY entry = queue->pendingFecBlockList.head;
+        if (entry->isParity) {
+            removeEntryFromList(&queue->pendingFecBlockList, entry);
+            free(entry->packet);
+            continue;
+        }
+
+        // Keep the ordered path linear without initializing a sorting table.
+        // Re-scanning the list for each reordered shard was quadratic for large
+        // unprotected PyroWave blocks (up to 1023 data shards).
+        if (entry->packet->sequenceNumber != nextSeqNum) {
+            stageReorderedFecBlock(queue);
+            return;
+        }
+
+        removeEntryFromList(&queue->pendingFecBlockList, entry);
+        // Use one receive timestamp per block, as for recovered/reordered data.
+        entry->receiveTimeUs = queue->bufferFirstRecvTimeUs;
+        insertEntryIntoList(&queue->completedFecBlockList, entry);
+        nextSeqNum = U16(nextSeqNum + 1);
     }
 }
 
