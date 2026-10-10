@@ -517,7 +517,7 @@ static void inputSendThreadProc(void* context) {
             uint8_t motionType = holder->packet.controllerMotion.motionType;
 
             LC_ASSERT(controllerNumber < MAX_GAMEPADS);
-            LC_ASSERT(motionType - 1 < MAX_MOTION_EVENTS);
+            LC_ASSERT(motionType >= 1 && motionType <= MAX_MOTION_EVENTS);
 
             PltLockMutex(&batchedInputMutex);
 
@@ -1550,9 +1550,10 @@ int LiSendControllerMotionEvent(uint8_t controllerNumber, uint8_t motionType, fl
         return -2;
     }
 
-    // Check for valid motion type values
-    if (motionType - 1 >= MAX_MOTION_EVENTS) {
-        LC_ASSERT(motionType - 1 < MAX_MOTION_EVENTS);
+    // Check for valid motion type values (1-based; motionType - 1 is int
+    // arithmetic, so 0 would pass a one-sided check and index [-1])
+    if (motionType < 1 || motionType > MAX_MOTION_EVENTS) {
+        LC_ASSERT(motionType >= 1 && motionType <= MAX_MOTION_EVENTS);
         return -3;
     }
 

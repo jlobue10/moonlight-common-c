@@ -706,6 +706,19 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
         queue->multiFecCurrentBlockNumber = fecCurrentBlockNumber;
         queue->multiFecLastBlockNumber = (nvPacket->multiFecBlocks >> 6) & 0x3;
 
+        // nanors refuses more than DATA_SHARDS_MAX shards per block, so parity for a
+        // larger block can never recover anything. Decide that once here rather than
+        // allocating and failing reed_solomon_new() for every parity packet (and
+        // asserting on it in debug builds): treat the block as unprotected, which
+        // rejects its parity shards as above the window.
+        if (queue->bufferParityPackets != 0 &&
+                queue->bufferDataPackets + queue->bufferParityPackets > DATA_SHARDS_MAX) {
+            Limelog("Frame %u: %u+%u shards exceed the %u-shard FEC limit; ignoring its parity\n",
+                    queue->currentFrameNumber, queue->bufferDataPackets, queue->bufferParityPackets, DATA_SHARDS_MAX);
+            queue->bufferParityPackets = 0;
+            queue->bufferHighestSequenceNumber = U16(queue->bufferFirstParitySequenceNumber - 1);
+        }
+
         queue->stats.packetCountVideo += queue->bufferDataPackets;
         queue->stats.packetCountFec += queue->bufferParityPackets;
     }

@@ -1180,6 +1180,66 @@ static bool sameCallbackState(void* a, void* b) {
     return key != 0 && key == asyncCallbackStateKey(b);
 }
 
+// Translates the host's termination message into the error code the listener
+// sees. Both forms carry an opaque host value; a message too short to hold it
+// is a host-side fault and is reported as one, never as a graceful exit (a
+// zero-filled short read used to map to ML_ERROR_GRACEFUL_TERMINATION).
+static int parseTerminationErrorCode(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLength) {
+    BYTE_BUFFER bb;
+    uint32_t terminationErrorCode;
+
+    if (packetLength < (int)sizeof(*ctlHdr)) {
+        Limelog("Server sent a truncated termination message (%d bytes)\n", packetLength);
+        return ML_ERROR_UNEXPECTED_EARLY_TERMINATION;
+    }
+
+    if (packetLength >= 6) {
+        // This is the extended termination message which contains a full HRESULT
+        BbInitializeWrappedBuffer(&bb, (char*)ctlHdr, sizeof(*ctlHdr), packetLength - sizeof(*ctlHdr), BYTE_ORDER_BIG);
+        if (!BbGet32(&bb, &terminationErrorCode)) {
+            Limelog("Server sent a truncated termination message (%d bytes)\n", packetLength);
+            return ML_ERROR_UNEXPECTED_EARLY_TERMINATION;
+        }
+
+        Limelog("Server notified termination reason: 0x%08x\n", terminationErrorCode);
+
+        // Normalize the termination error codes for specific values we recognize
+        switch (terminationErrorCode) {
+        case 0x800e9403: // NVST_DISCONN_SERVER_VIDEO_ENCODER_CONVERT_INPUT_FRAME_FAILED
+            return ML_ERROR_FRAME_CONVERSION;
+        case 0x800e9302: // NVST_DISCONN_SERVER_VFP_PROTECTED_CONTENT
+            return ML_ERROR_PROTECTED_CONTENT;
+        case 0x80030023: // NVST_DISCONN_SERVER_TERMINATED_CLOSED
+            // Error code 0 tells the client this was not an error; if we never saw
+            // a frame, this is probably an error that caused NvStreamer to
+            // terminate prior to sending any frames.
+            return lastSeenFrame != 0 ? ML_ERROR_GRACEFUL_TERMINATION : ML_ERROR_UNEXPECTED_EARLY_TERMINATION;
+        default:
+            return (int)terminationErrorCode;
+        }
+    }
+    else {
+        uint16_t terminationReason;
+
+        // This is the short termination message
+        BbInitializeWrappedBuffer(&bb, (char*)ctlHdr, sizeof(*ctlHdr), packetLength - sizeof(*ctlHdr), BYTE_ORDER_LITTLE);
+        if (!BbGet16(&bb, &terminationReason)) {
+            Limelog("Server sent a truncated termination message (%d bytes)\n", packetLength);
+            return ML_ERROR_UNEXPECTED_EARLY_TERMINATION;
+        }
+
+        Limelog("Server notified termination reason: 0x%04x\n", terminationReason);
+
+        // SERVER_TERMINATED_INTENDED
+        if (terminationReason == 0x0100) {
+            return lastSeenFrame != 0 ? ML_ERROR_GRACEFUL_TERMINATION : ML_ERROR_UNEXPECTED_EARLY_TERMINATION;
+        }
+
+        // Otherwise pass the reason unmodified
+        return terminationReason;
+    }
+}
+
 static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLength) {
     BYTE_BUFFER bb;
     PQUEUED_ASYNC_CALLBACK queuedCb;
@@ -1479,67 +1539,7 @@ static void controlReceiveThreadFunc(void* context) {
                 queueAsyncCallback(ctlHdr, packetLength);
             }
             else if (ctlHdr->type == packetTypes[IDX_TERMINATION]) {
-                BYTE_BUFFER bb;
-
-
-                uint32_t terminationErrorCode;
-
-                if (packetLength >= 6) {
-                    // This is the extended termination message which contains a full HRESULT
-                    BbInitializeWrappedBuffer(&bb, (char*)ctlHdr, sizeof(*ctlHdr), packetLength - sizeof(*ctlHdr), BYTE_ORDER_BIG);
-                    BbGet32(&bb, &terminationErrorCode);
-
-                    Limelog("Server notified termination reason: 0x%08x\n", terminationErrorCode);
-
-                    // Normalize the termination error codes for specific values we recognize
-                    switch (terminationErrorCode) {
-                    case 0x800e9403: // NVST_DISCONN_SERVER_VIDEO_ENCODER_CONVERT_INPUT_FRAME_FAILED
-                        terminationErrorCode = ML_ERROR_FRAME_CONVERSION;
-                        break;
-                    case 0x800e9302: // NVST_DISCONN_SERVER_VFP_PROTECTED_CONTENT
-                        terminationErrorCode = ML_ERROR_PROTECTED_CONTENT;
-                        break;
-                    case 0x80030023: // NVST_DISCONN_SERVER_TERMINATED_CLOSED
-                        if (lastSeenFrame != 0) {
-                            // Pass error code 0 to notify the client that this was not an error
-                            terminationErrorCode = ML_ERROR_GRACEFUL_TERMINATION;
-                        }
-                        else {
-                            // We never saw a frame, so this is probably an error that caused
-                            // NvStreamer to terminate prior to sending any frames.
-                            terminationErrorCode = ML_ERROR_UNEXPECTED_EARLY_TERMINATION;
-                        }
-                        break;
-                    default:
-                        break;
-                    }
-                }
-                else {
-                    uint16_t terminationReason;
-
-                    // This is the short termination message
-                    BbInitializeWrappedBuffer(&bb, (char*)ctlHdr, sizeof(*ctlHdr), packetLength - sizeof(*ctlHdr), BYTE_ORDER_LITTLE);
-                    BbGet16(&bb, &terminationReason);
-
-                    Limelog("Server notified termination reason: 0x%04x\n", terminationReason);
-
-                    // SERVER_TERMINATED_INTENDED
-                    if (terminationReason == 0x0100) {
-                        if (lastSeenFrame != 0) {
-                            // Pass error code 0 to notify the client that this was not an error
-                            terminationErrorCode = ML_ERROR_GRACEFUL_TERMINATION;
-                        }
-                        else {
-                            // We never saw a frame, so this is probably an error that caused
-                            // NvStreamer to terminate prior to sending any frames.
-                            terminationErrorCode = ML_ERROR_UNEXPECTED_EARLY_TERMINATION;
-                        }
-                    }
-                    else {
-                        // Otherwise pass the reason unmodified
-                        terminationErrorCode = terminationReason;
-                    }
-                }
+                int terminationErrorCode = parseTerminationErrorCode(ctlHdr, packetLength);
 
                 // We used to wait for a ENET_EVENT_TYPE_DISCONNECT event, but since
                 // GFE 3.20.3.63 we don't get one for 10 seconds after we first get
@@ -1552,7 +1552,7 @@ static void controlReceiveThreadFunc(void* context) {
                 PltLockMutex(&enetMutex);
                 enet_peer_disconnect_now(peer, 0);
                 PltUnlockMutex(&enetMutex);
-                ListenerCallbacks.connectionTerminated((int)terminationErrorCode);
+                ListenerCallbacks.connectionTerminated(terminationErrorCode);
                 free(ctlHdr);
                 return;
             }

@@ -6,10 +6,11 @@ build=${1:?Usage: tests/run-regressions.sh path/to/cmake-build}
 build=$(CDPATH= cd -- "$build" && pwd)
 cc=${CC:-cc}
 # Match sanitizer flags used to build the library via CFLAGS, when applicable.
-for test in steam_haptic hdr_state control_truncation video_drain rtp_admission; do
+for test in steam_haptic hdr_state control_truncation video_drain rtp_admission socket_subnet input_motion audio_queue; do
     extra_flags=
-    # Queue ownership assertions are part of the decoder-race reproduction.
-    if [ "$test" = video_drain ]; then extra_flags=-DLC_DEBUG; fi
+    # Queue ownership assertions are part of the decoder-race reproduction; the
+    # oversized-FEC-block case asserted in debug builds before it was handled.
+    if [ "$test" = video_drain ] || [ "$test" = rtp_admission ]; then extra_flags=-DLC_DEBUG; fi
     "$cc" ${CFLAGS:-} $extra_flags -ffunction-sections -fdata-sections -DHAS_SOCKLEN_T \
         -I"$repo/src" -I"$repo/enet/include" -I"$repo/nanors" -I"$repo/nanors/deps" -I"$repo/nanors/deps/obl" \
         "$repo/tests/test_$test.c" \
@@ -24,5 +25,8 @@ done
 "$build/test-video_drain" flush
 "$build/test-video_drain" av1
 "$build/test-rtp_admission"
+"$build/test-socket_subnet"
+"$build/test-input_motion"
+"$build/test-audio_queue"
 "$build/test-video-format"
 python3 "$repo/tests/test_server_commands.py"

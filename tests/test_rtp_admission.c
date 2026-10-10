@@ -54,6 +54,26 @@ static int addPacket(uint32_t frame, uint16_t seq, uint32_t fecIndex, uint32_t d
     return status;
 }
 
+// A shard of a block that declares parity: fecIndex counts data then parity shards.
+static int addFecPacket(uint32_t frame, uint16_t seq, uint32_t fecIndex, uint32_t dataPackets, uint32_t fecPercentage, int sof, int eof) {
+    const int headerLen = sizeof(RTP_PACKET) + 4 + sizeof(NV_VIDEO_PACKET);
+    const int length = headerLen + PAYLOAD;
+    char* buffer = calloc(1, length + sizeof(RTPV_QUEUE_ENTRY));
+    PRTP_PACKET rtp = (PRTP_PACKET)buffer;
+    rtp->header = FLAG_EXTENSION;
+    rtp->sequenceNumber = seq;
+    PNV_VIDEO_PACKET nv = (PNV_VIDEO_PACKET)(buffer + sizeof(RTP_PACKET) + 4);
+    nv->streamPacketIndex = LE32(seq);
+    nv->frameIndex = LE32(frame);
+    nv->flags = (sof ? FLAG_SOF : 0) | (eof ? FLAG_EOF : 0);
+    nv->multiFecFlags = 0x10;
+    nv->multiFecBlocks = 0x00;
+    nv->fecInfo = LE32((dataPackets << 22) | (fecIndex << 12) | (fecPercentage << 4));
+    int status = RtpvAddPacket(&queue, rtp, length, (PRTPV_QUEUE_ENTRY)(buffer + length));
+    if (status != RTPF_RET_QUEUED) free(buffer);
+    return status;
+}
+
 int main(void) {
     memcpy(AppVersionQuad, (int[]){7, 1, 431, 0}, sizeof(AppVersionQuad));  // multi-FEC capable host
     StreamConfig.packetSize = PAYLOAD;
@@ -103,6 +123,42 @@ int main(void) {
     check(addPacket(3, 0, 2, 3, 0, 1) == RTPF_RET_REJECTED, "wrap: duplicate past the wrap rejected");
     check(addPacket(3, 65535, 1, 3, 0, 0) == RTPF_RET_QUEUED && delivered == 13 && deliveredInOrder,
           "wrap: middle shard completes the frame in order");
+
+    // A block whose data + parity exceed nanors' 255-shard limit can never be recovered:
+    // its parity must be ignored up front (no reed_solomon_new() per packet, no assert)
+    // and the frame reported lost like any other incomplete block.
+    RtpvCleanupQueue(&queue);
+    RtpvInitializeQueue(&queue);
+    delivered = 0; lostFrames = 0;
+    const uint32_t wide = 300, parity = 30;  // 10 % of 300
+    int wideQueued = 0, parityRejected = 0;
+    for (uint32_t i = 0; i < wide; i++) {
+        if (i == 7) continue;  // lost
+        if (addFecPacket(1, (uint16_t)(1000 + i), i, wide, 10, i == 0, i == wide - 1) == RTPF_RET_QUEUED) ++wideQueued;
+    }
+    for (uint32_t i = 0; i < parity; i++) {
+        if (addFecPacket(1, (uint16_t)(1000 + wide + i), wide + i, wide, 10, 0, 0) == RTPF_RET_REJECTED) ++parityRejected;
+    }
+    check(wideQueued == (int)wide - 1, "oversized FEC block: every data shard is admitted");
+    check(parityRejected == (int)parity, "oversized FEC block: parity shards are rejected instead of fed to nanors");
+    check(delivered == 0 && lostFrames == 0, "oversized FEC block: nothing delivered, not yet reported");
+    check(addFecPacket(2, (uint16_t)(1000 + wide + parity), 0, 2, 0, 1, 0) == RTPF_RET_QUEUED && lostFrames == 1,
+          "oversized FEC block: reported lost once when the next frame starts");
+    // A block within the limit still uses its parity window.
+    check(addFecPacket(2, (uint16_t)(1000 + wide + parity + 1), 1, 2, 0, 0, 1) == RTPF_RET_QUEUED && delivered == 2,
+          "the next frame completes normally");
+    RtpvCleanupQueue(&queue);
+    RtpvInitializeQueue(&queue);
+    delivered = 0;
+    for (uint32_t i = 0; i < 200; i++) {
+        if (i == 3) continue;
+        addFecPacket(1, (uint16_t)(2000 + i), i, 200, 10, i == 0, i == 199);
+    }
+    int smallParityQueued = 0;
+    for (uint32_t i = 0; i < 20; i++) {
+        if (addFecPacket(1, (uint16_t)(2200 + i), 200 + i, 200, 10, 0, 0) == RTPF_RET_QUEUED) ++smallParityQueued;
+    }
+    check(smallParityQueued >= 1, "a block within the FEC limit still admits its parity shards");
 
     RtpvCleanupQueue(&queue);
     printf("%d checks, %d failures\n", checks, failures);
