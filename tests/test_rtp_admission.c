@@ -135,11 +135,17 @@ static void deliverRecoverableBlock(uint32_t frame, uint16_t base, unsigned int 
         nv->fecInfo = stamped->fecInfo;
         free(header);
     }
+    unsigned char* submitted = calloc(data + parity, 1);
     for (unsigned int n = 0; n < count; n++) {
         unsigned int i = order[n];
-        if ((int)i == skip) { free(buffers[i]); continue; }
-        submitBuffer(buffers[i], length);
+        if ((int)i == skip) continue;
+        submitted[i] = 1;
+        submitBuffer(buffers[i], length);  // frees the buffer itself when the queue rejects it
     }
+    for (unsigned int i = 0; i < data + parity; i++) {
+        if (!submitted[i]) free(buffers[i]);  // the lost shards never reach the queue
+    }
+    free(submitted);
     free(shards);
     free(buffers);
 }
