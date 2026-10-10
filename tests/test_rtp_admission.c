@@ -118,12 +118,20 @@ static void deliverRecoverableBlock(uint32_t frame, uint16_t base, unsigned int 
     int encodeResult = reed_solomon_encode(rs, shards, data + parity, StreamConfig.packetSize + MAX_RTP_HEADER_SIZE);
     assert(encodeResult == 0);
     reed_solomon_release(rs);
-    // The host rewrites the parity shards' RTP/NV headers after encoding; the queue patches the
-    // same fields in a recovered packet, so recovery of the payload is unaffected.
+    // The host stamps the RTP header and the FEC bookkeeping fields of each parity shard after
+    // encoding; the queue patches exactly those fields in a recovered packet, so the payload and
+    // the remaining NV header fields (flags, extraFlags, streamPacketIndex) come out of the
+    // Reed-Solomon output unchanged and must be left as encoded here.
     for (unsigned int i = data; i < data + parity; i++) {
         int unused;
         char* header = buildFecPacket(frame, (uint16_t)(base + i), i, data, percentage, 0, 0, &unused);
-        memcpy(buffers[i], header, sizeof(RTP_PACKET) + 4 + sizeof(NV_VIDEO_PACKET));
+        memcpy(buffers[i], header, sizeof(RTP_PACKET) + 4);
+        PNV_VIDEO_PACKET stamped = (PNV_VIDEO_PACKET)(header + sizeof(RTP_PACKET) + 4);
+        PNV_VIDEO_PACKET nv = (PNV_VIDEO_PACKET)(buffers[i] + sizeof(RTP_PACKET) + 4);
+        nv->frameIndex = stamped->frameIndex;
+        nv->multiFecFlags = stamped->multiFecFlags;
+        nv->multiFecBlocks = stamped->multiFecBlocks;
+        nv->fecInfo = stamped->fecInfo;
         free(header);
     }
     for (unsigned int n = 0; n < count; n++) {
