@@ -118,6 +118,10 @@ int initializeInputStream(void) {
     // Start with the virtual mouse centered
     absCurrentPosX = absCurrentPosY = 0.5f;
 
+    // destroyInputStream() frees the holders still queued at the end of a session;
+    // a pointer left here would send the next session's first controller packet
+    // into freed memory.
+    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
     memset(currentGamepadSensorState, 0, sizeof(currentGamepadSensorState));
     memset(&currentRelativeMouseState, 0, sizeof(currentRelativeMouseState));
     memset(&currentAbsoluteMouseState, 0, sizeof(currentAbsoluteMouseState));
@@ -1153,6 +1157,17 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
         if (err != LBQ_SUCCESS) {
             LC_ASSERT(err == LBQ_BOUND_EXCEEDED);
             Limelog("Input queue reached maximum size limit\n");
+
+            // The holder was published as the controller's current packet above but never
+            // reached the queue, so the input thread will never clear that pointer for us.
+            // Clear it before freeing, or the next event for this controller coalesces into
+            // a freed (or already recycled) holder.
+            PltLockMutex(&batchedInputMutex);
+            if (currentQueuedControllerPacket[controllerNumber] == holder) {
+                currentQueuedControllerPacket[controllerNumber] = NULL;
+            }
+            PltUnlockMutex(&batchedInputMutex);
+
             freePacketHolder(holder);
         }
     }

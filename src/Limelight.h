@@ -87,6 +87,13 @@ typedef struct _STREAM_CONFIGURATION {
     // option (listed above). If not set, the encoder will default to Limited.
     int colorRange;
 
+    // PyroWave sizes its bitrate from the resolution and frame rate (bits per
+    // pixel), which is far above what a conventional codec should be asked for.
+    // When PyroWave was requested but the host turns out not to offer a
+    // compatible bitstream, the connection falls back to HEVC/AV1/H.264 and uses
+    // this bitrate (kbps) instead of `bitrate`. 0 keeps `bitrate` as is.
+    int pyroWaveFallbackBitrate;
+
     // Specifies the data streams where encryption may be enabled if supported
     // by the host PC. Ideally, you would pass ENCFLG_ALL to encrypt everything
     // that we support encrypting. However, lower performance hardware may not
