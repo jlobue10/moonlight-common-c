@@ -35,8 +35,13 @@ typedef struct _RTP_VIDEO_QUEUE {
     uint32_t fecPercentage;
     uint32_t nextContiguousSequenceNumber;
     uint32_t missingPackets; // # of holes behind receivedHighestSequenceNumber
-    bool useFastQueuePath;
     bool reportedLostFrame;
+
+    // One bit per sequence number of the current FEC block, relative to
+    // bufferLowestSequenceNumber. Duplicate detection in O(1): the list walk it
+    // replaces went quadratic on PyroWave's ~1000-shard blocks after the first
+    // loss. Sized for the fecInfo limits (1023 data + 2609 parity shards).
+    uint8_t receivedBitmap[(1023 + 2609 + 7) / 8];
 
     uint32_t currentFrameNumber;
 
