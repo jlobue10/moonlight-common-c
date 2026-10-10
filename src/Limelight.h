@@ -917,6 +917,11 @@ int LiFindExternalAddressIP4(const char* stunServer, unsigned short stunPort, un
 // if CAPABILITY_DIRECT_SUBMIT is not set for the video renderer.
 int LiGetPendingVideoFrames(void);
 
+// Complete frames intentionally skipped by the internal decoder's newest-frame
+// policy, not lost on the network. Resets at connection start; wraps as uint32.
+// The count is updated before the next submitDecodeUnit callback.
+unsigned int LiGetSkippedVideoFrames(void);
+
 // Returns the number of queued audio frames ready for delivery. Only relevant
 // if CAPABILITY_DIRECT_SUBMIT is not set for the audio renderer. For most uses,
 // LiGetPendingAudioDuration() is probably a better option than this function.
