@@ -306,8 +306,11 @@ static PRTPA_FEC_BLOCK getFecBlockForRtpPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACK
     // tail block that makes handleMissingPackets() abandon the current block at
     // once (two packets of concealment and a permanent exit from fast recovery
     // per shard). Data packets are not bounded here: a long loss burst must
-    // still be able to move the queue forward.
-    if (packet->packetType == RTP_PAYLOAD_TYPE_FEC && !queue->synchronizing &&
+    // still be able to move the queue forward. The next expected sequence
+    // number is already fixed while synchronising, so the bound applies there
+    // as well; otherwise a shard in the first few milliseconds of a stream
+    // would pin a far tail block for minutes.
+    if (packet->packetType == RTP_PAYLOAD_TYPE_FEC &&
             isBefore16(queue->nextRtpSequenceNumber, fecBlockBaseSeqNum) &&
             U16(fecBlockBaseSeqNum - queue->nextRtpSequenceNumber) > RTPA_MAX_FEC_BLOCKS_AHEAD * RTPA_DATA_SHARDS) {
         queue->stats.packetCountFecInvalid++;

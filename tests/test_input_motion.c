@@ -20,6 +20,13 @@ int main(void) {
           currentGamepadSensorState[3][LI_MOTION_TYPE_ACCEL - 1].z == 3.0f, "events land in their own slots");
     check(currentGamepadSensorState[2][MAX_MOTION_EVENTS - 1].x == 0.0f, "the neighbouring controller's state is untouched");
 
+    // Controller numbers are 0..15; a negative one survived the signed modulus and indexed before the table.
+    check(LiSendMultiControllerEvent(-1, 1, 0, 0, 0, 0, 0, 0, 0) == -3, "controller -1 is rejected");
+    check(LiSendMultiControllerEvent(-16, 1, 0, 0, 0, 0, 0, 0, 0) == -3, "controller -16 is rejected");
+    check(LiSendMultiControllerEvent(-32768, 1, 0, 0, 0, 0, 0, 0, 0) == -3, "controller -32768 is rejected");
+    check(LiSendMultiControllerEvent(0, 1, 0x1000, 0, 0, 0, 0, 0, 0) == 0, "controller 0 is queued");
+    check(LiSendMultiControllerEvent(15, 0x8000, 0, 0, 0, 0, 0, 0, 0) == 0, "controller 15 is queued");
+
     initialized = false;
     // No sender thread is started by this fixture; close both queues explicitly.
     LbqSignalQueueShutdown(&packetHolderFreeList);

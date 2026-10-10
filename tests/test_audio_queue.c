@@ -53,6 +53,11 @@ int main(void) {
     // Synchronisation consumes the first partial block; delivery starts at the next boundary
     // and the queue leaves its synchronising state once that block has been consumed.
     addData(100);
+    // The next expected packet is fixed by the first packet, so a far-future parity shard is
+    // bounded during synchronisation too (it used to pin a tail block for minutes).
+    unsigned char zerosEarly[BLOCK] = {0};
+    check(addFec((uint16_t)(104 + 4000), 0, zerosEarly) == 0 && queue.blockTail == NULL &&
+          queue.stats.packetCountFecInvalid == 1, "a far-future parity shard during synchronisation opens no block");
     check(addData(104) == RTPQ_RET_HANDLE_NOW && addData(105) == RTPQ_RET_HANDLE_NOW &&
           addData(106) == RTPQ_RET_HANDLE_NOW && addData(107) == RTPQ_RET_HANDLE_NOW, "in-order data is handed over at once");
     check(!queue.synchronizing, "the queue is synchronised after its first full block");
