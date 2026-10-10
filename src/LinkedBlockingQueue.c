@@ -106,10 +106,12 @@ int LbqOfferQueueItemPriority(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLIN
         bool important = priority(data);
         int events = 0;
         for (PLINKED_BLOCKING_QUEUE_ENTRY p = queueHead->head; p != NULL; p = p->flink) {
-            if (important && matches(data, p->data)) victim = p;
             if (!priority(p->data)) {
                 if (firstEvent == NULL) firstEvent = p;
                 ++events;
+            }
+            else if (important && matches(data, p->data)) {
+                victim = p;
             }
         }
         if (victim == NULL && (queueHead->currentSize == queueHead->sizeBound ||

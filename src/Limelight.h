@@ -1054,6 +1054,11 @@ typedef struct _SS_HDR_METADATA {
 // function when HDR mode is active on the host. This is a Sunshine protocol extension.
 bool LiGetHdrMetadata(PSS_HDR_METADATA metadata);
 
+// Reads the HDR enabled flag and (when the host sends it) the metadata as one
+// snapshot. Returns true when the metadata is valid, i.e. a Sunshine-class host
+// reported HDR enabled. Use this from the setHdrMode callback instead of two reads.
+bool LiGetHdrState(bool* enabled, PSS_HDR_METADATA metadata);
+
 // This function requests an IDR frame from the host. Typically this is done using DR_NEED_IDR, but clients
 // processing frames asynchronously may need to reset their decoder state even after returning DR_OK for
 // the prior frame. Rather than wait for a new frame and return DR_NEED_IDR for that one, they can just

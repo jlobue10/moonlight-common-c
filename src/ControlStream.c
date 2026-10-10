@@ -2181,6 +2181,17 @@ bool LiGetCurrentHostDisplayHdrMode(void) {
     return enabled;
 }
 
+bool LiGetHdrState(bool* enabled, PSS_HDR_METADATA metadata) {
+    lockHdrState();
+    *enabled = hdrEnabled;
+    if (metadata != NULL) {
+        *metadata = hdrMetadata;
+    }
+    unlockHdrState();
+    // Only Sunshine-class hosts carry metadata in the HDR message.
+    return IS_SUNSHINE() && *enabled;
+}
+
 bool LiGetHdrMetadata(PSS_HDR_METADATA metadata) {
     if (!IS_SUNSHINE()) return false;
     lockHdrState();
