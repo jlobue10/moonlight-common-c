@@ -443,12 +443,11 @@ static void skipToNextNalOrEnd(PBUFFER_DESC buffer) {
     }
 }
 
-// Advance the buffer descriptor to the start of the next NAL
+// Advance the buffer descriptor to the start of the next NAL. An AUD/SEI/PPS prefix
+// that runs to the end of the packet leaves nothing behind; the callers check for that
+// instead of asserting on host data.
 static void skipToNextNal(PBUFFER_DESC buffer) {
     skipToNextNalOrEnd(buffer);
-
-    // If we skipped all the data, something has gone horribly wrong
-    LC_ASSERT(buffer->length > 0);
 }
 
 static bool isIdrFrameStart(PBUFFER_DESC buffer) {
@@ -680,6 +679,10 @@ static void processAvcHevcRtpPayloadSlow(PBUFFER_DESC currentPos, PLENTRY_INTERN
         // completely sufficient to handle that case.
         while (isAccessUnitDelimiter(currentPos) || isSeiNal(currentPos)) {
             skipToNextNal(currentPos);
+        }
+        if (currentPos->length == 0) {
+            // Only prefix NALs remained: nothing to queue (a zero-length fragment was queued before)
+            break;
         }
 
         int start = currentPos->offset;
@@ -1007,6 +1010,23 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
             // frame data *after* the (optional) AUD.
             while (isSeiNal(&currentPos)) {
                 skipToNextNal(&currentPos);
+            }
+
+            if (currentPos.length == 0) {
+                // The first packet held nothing but prefix NALs: no slice can follow in
+                // this packet, so treat the frame like any other corrupt one instead of
+                // queueing a zero-length decode unit with the NAL tail as picture data.
+                Limelog("Depacketizer dropped frame %d: first packet holds only prefix NALs\n", frameIndex);
+                decodingFrame = false;
+                nextFrameNumber = frameIndex + 1;
+                dropFrameState();
+                if (waitingForIdrFrame) {
+                    LiRequestIdrFrame();
+                }
+                else {
+                    connectionDetectedFrameLoss(startFrameNumber, frameIndex);
+                }
+                return;
             }
         }
     }
