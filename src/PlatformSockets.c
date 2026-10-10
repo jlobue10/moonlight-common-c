@@ -363,6 +363,7 @@ SOCKET bindUdpSocket(int addressFamily, struct sockaddr_storage* localAddr, SOCK
         bufferSize = n3ds_max_buf_size;
 #endif
     if (bufferSize != 0) {
+        int requestedSize = bufferSize;
         // We start at the requested recv buffer value and step down until we find
         // a value that the OS will accept.
         for (;;) {
@@ -400,10 +401,14 @@ SOCKET bindUdpSocket(int addressFamily, struct sockaddr_storage* localAddr, SOCK
             // step-down loop above cannot tell what it got. Log the effective size:
             // a PyroWave stream that asked for ~11 MB and received 4 MB has ~100 ms
             // of burst tolerance at 300 Mbps, which matters when reading loss reports.
-            int requestedSize = bufferSize;
             SOCKADDR_LEN len = sizeof(bufferSize);
             if (getsockopt(s, SOL_SOCKET, SO_RCVBUF, (char*)&bufferSize, &len) == 0) {
+#if defined(__linux__)
+                // Linux reports twice the usable size (it books its own overhead).
+                Limelog("Receive buffer size: %d (requested %d)\n", bufferSize / 2, requestedSize);
+#else
                 Limelog("Receive buffer size: %d (requested %d)\n", bufferSize, requestedSize);
+#endif
             }
         }
     }
