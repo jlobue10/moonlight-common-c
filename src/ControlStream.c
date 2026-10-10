@@ -338,7 +338,8 @@ int initializeControlStream(void) {
     LbqInitializeLinkedBlockingQueue(&frameFecStatusQueue, 8); // Limits number of frame status reports per periodic ping interval
     // Steam haptic reports are queued one per packet (a stop must not be coalesced
     // away), so a burst of UI clicks needs more headroom than rumble/LED callbacks.
-    LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 64);
+    // Seven explicit stop keys per controller (16 * 7 = 112), plus ordinary feedback.
+    LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 128);
     PltCreateMutex(&enetMutex);
 
     encryptedControlStream = APP_VERSION_AT_LEAST(7, 1, 431);
@@ -939,76 +940,41 @@ static int ignoreDisconnectIntercept(ENetHost* host, ENetEvent* event) {
     return 0;
 }
 
+static bool canBatchAsyncCallback(void* current, void* next) {
+    PQUEUED_ASYNC_CALLBACK a = current, b = next;
+    if (a->typeIndex != b->typeIndex) return false;
+    switch (a->typeIndex) {
+    case IDX_RUMBLE_DATA: return a->data.rumble.controllerNumber == b->data.rumble.controllerNumber;
+    case IDX_RUMBLE_TRIGGER_DATA: return a->data.rumbleTriggers.controllerNumber == b->data.rumbleTriggers.controllerNumber;
+    case IDX_SET_RGB_LED: return a->data.setControllerLed.controllerNumber == b->data.setControllerLed.controllerNumber;
+    case IDX_HDR_INFO: return true;
+    default: return false;
+    }
+}
+
 static void asyncCallbackThreadFunc(void* context) {
     PQUEUED_ASYNC_CALLBACK queuedCb, nextCb;
 
     while (LbqWaitForQueueElement(&asyncCallbackQueue, (void**)&queuedCb) == LBQ_SUCCESS) {
+        // Priority insertion can replace queued items. Match and take ownership
+        // under one lock instead of dereferencing a borrowed peek after unlocking.
+        while (LbqPollQueueElementMatching(&asyncCallbackQueue, (void**)&nextCb,
+                canBatchAsyncCallback, queuedCb) == LBQ_SUCCESS) {
+            free(queuedCb);
+            queuedCb = nextCb;
+        }
         switch (queuedCb->typeIndex) {
         case IDX_RUMBLE_DATA:
-            // Look for another rumble packet to batch with
-            while (LbqPeekQueueElement(&asyncCallbackQueue, (void**)&nextCb) == LBQ_SUCCESS) {
-                // Don't batch with the next packet if it is a different type or controller number
-                if (nextCb->typeIndex != queuedCb->typeIndex ||
-                        nextCb->data.rumble.controllerNumber != queuedCb->data.rumble.controllerNumber) {
-                    break;
-                }
-
-                // This entry is batchable, so pop it off the queue
-                if (LbqPollQueueElement(&asyncCallbackQueue, (void**)&nextCb) != LBQ_SUCCESS) {
-                    break;
-                }
-
-                // Replace the old entry with the new one
-                free(queuedCb);
-                queuedCb = nextCb;
-            }
-
             ListenerCallbacks.rumble(queuedCb->data.rumble.controllerNumber,
                                      queuedCb->data.rumble.lowFreqRumble,
                                      queuedCb->data.rumble.highFreqRumble);
             break;
         case IDX_RUMBLE_TRIGGER_DATA:
-            // Look for another rumble triggers packet to batch with
-            while (LbqPeekQueueElement(&asyncCallbackQueue, (void**)&nextCb) == LBQ_SUCCESS) {
-                // Don't batch with the next packet if it is a different type or controller number
-                if (nextCb->typeIndex != queuedCb->typeIndex ||
-                        nextCb->data.rumbleTriggers.controllerNumber != queuedCb->data.rumbleTriggers.controllerNumber) {
-                    break;
-                }
-
-                // This entry is batchable, so pop it off the queue
-                if (LbqPollQueueElement(&asyncCallbackQueue, (void**)&nextCb) != LBQ_SUCCESS) {
-                    break;
-                }
-
-                // Replace the old entry with the new one
-                free(queuedCb);
-                queuedCb = nextCb;
-            }
-
             ListenerCallbacks.rumbleTriggers(queuedCb->data.rumbleTriggers.controllerNumber,
                                              queuedCb->data.rumbleTriggers.leftTriggerMotor,
                                              queuedCb->data.rumbleTriggers.rightTriggerMotor);
             break;
         case IDX_SET_RGB_LED:
-            // Look for another controller LED packet to batch with
-            while (LbqPeekQueueElement(&asyncCallbackQueue, (void**)&nextCb) == LBQ_SUCCESS) {
-                // Don't batch with the next packet if it is a different type or controller number
-                if (nextCb->typeIndex != queuedCb->typeIndex ||
-                        nextCb->data.setControllerLed.controllerNumber != queuedCb->data.setControllerLed.controllerNumber) {
-                    break;
-                }
-
-                // This entry is batchable, so pop it off the queue
-                if (LbqPollQueueElement(&asyncCallbackQueue, (void**)&nextCb) != LBQ_SUCCESS) {
-                    break;
-                }
-
-                // Replace the old entry with the new one
-                free(queuedCb);
-                queuedCb = nextCb;
-            }
-
             ListenerCallbacks.setControllerLED(queuedCb->data.setControllerLed.controllerNumber,
                                                queuedCb->data.setControllerLed.r,
                                                queuedCb->data.setControllerLed.g,
@@ -1016,18 +982,6 @@ static void asyncCallbackThreadFunc(void* context) {
             break;
         case IDX_HDR_INFO:
             // HDR state is maintained globally, so we just invoke the client callback here.
-            // These events are stateless, so we can consume all of them now.
-            while (LbqPeekQueueElement(&asyncCallbackQueue, (void**)&nextCb) == LBQ_SUCCESS && nextCb->typeIndex == queuedCb->typeIndex) {
-                // This entry is batchable, so pop it off the queue
-                if (LbqPollQueueElement(&asyncCallbackQueue, (void**)&nextCb) != LBQ_SUCCESS) {
-                    break;
-                }
-
-                // Replace the old entry with the new one
-                free(queuedCb);
-                queuedCb = nextCb;
-            }
-
             ListenerCallbacks.setHdrMode(hdrEnabled);
             break;
 
@@ -1046,8 +1000,8 @@ static void asyncCallbackThreadFunc(void* context) {
                                                   queuedCb->data.dsAdaptiveTrigger.right);
             break;
         case IDX_STEAM_HAPTIC:
-            // Every report counts: Steam repeats the same click to keep a pad buzzing, and a
-            // pulse followed by its stop must reach the controller as two reports.
+            // Repeated effects are not batched. Explicit stops alone may be coalesced
+            // at insertion, retaining their order against intervening effects.
             ListenerCallbacks.steamHaptic(queuedCb->data.steamHaptic.controllerNumber,
                                           queuedCb->data.steamHaptic.length,
                                           queuedCb->data.steamHaptic.report);
@@ -1070,6 +1024,34 @@ static bool needsAsyncCallback(unsigned short packetType) {
            packetType == packetTypes[IDX_HDR_INFO] ||
            packetType == packetTypes[IDX_DS_ADAPTIVE_TRIGGERS] ||
            packetType == packetTypes[IDX_STEAM_HAPTIC];
+}
+
+// Return a stop key including both report family and actuator mask.
+// Keep families distinct: do not assume their hardware stop effects are interchangeable.
+static unsigned steam_haptic_stop_key(const unsigned char *report, unsigned length) {
+    if (length >= 10 && report[0] == 0x80 &&
+            report[4] == 0 && report[5] == 0 && report[7] == 0 && report[8] == 0) {
+        return (0x80u << 2) | 3;
+    }
+    if (length < 2 || report[1] > 2) return 0;
+    if ((length >= 8 && report[0] == 0x81 &&
+            ((report[2] == 0 && report[3] == 0) || (report[6] == 0 && report[7] == 0))) ||
+            (length >= 4 && report[0] == 0x82 && report[2] == 0)) {
+        return ((unsigned)report[0] << 2) | (report[1] == 2 ? 3 : 1u << report[1]);
+    }
+    return 0;
+}
+
+static bool isSteamHapticStop(void* value) {
+    PQUEUED_ASYNC_CALLBACK cb = value;
+    return cb->typeIndex == IDX_STEAM_HAPTIC &&
+        steam_haptic_stop_key(cb->data.steamHaptic.report, cb->data.steamHaptic.length) != 0;
+}
+static bool sameSteamHapticStop(void* a, void* b) {
+    PQUEUED_ASYNC_CALLBACK x = a, y = b;
+    return isSteamHapticStop(b) && x->data.steamHaptic.controllerNumber == y->data.steamHaptic.controllerNumber &&
+        steam_haptic_stop_key(x->data.steamHaptic.report, x->data.steamHaptic.length) ==
+        steam_haptic_stop_key(y->data.steamHaptic.report, y->data.steamHaptic.length);
 }
 
 static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLength) {
@@ -1150,7 +1132,10 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
         return;
     }
 
-    err = LbqOfferQueueItem(&asyncCallbackQueue, queuedCb, &queuedCb->entry);
+    void* displaced = NULL;
+    err = LbqOfferQueueItemPriority(&asyncCallbackQueue, queuedCb, &queuedCb->entry,
+        sameSteamHapticStop, isSteamHapticStop, &displaced);
+    free(displaced);
     if (err != LBQ_SUCCESS) {
         Limelog("Failed to queue async callback: %d\n", err);
         free(queuedCb);
