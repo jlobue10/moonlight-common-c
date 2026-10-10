@@ -82,6 +82,14 @@ int LbqGetItemCount(PLINKED_BLOCKING_QUEUE queueHead) {
     return queueHead->currentSize;
 }
 
+bool LbqIsQueueTail(PLINKED_BLOCKING_QUEUE queueHead, PLINKED_BLOCKING_QUEUE_ENTRY entry) {
+    PltLockMutex(&queueHead->mutex);
+    bool matches = entry != NULL && queueHead->tail == entry &&
+                   !queueHead->shutdown && !queueHead->draining;
+    PltUnlockMutex(&queueHead->mutex);
+    return matches;
+}
+
 int LbqOfferQueueItem(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINKED_BLOCKING_QUEUE_ENTRY entry) {
     return LbqOfferQueueItemPriority(queueHead, data, entry, NULL, NULL, 0, NULL);
 }
