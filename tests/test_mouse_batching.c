@@ -2,20 +2,36 @@
 // not consume movement that was submitted after a click, key or scroll event.
 #include "../src/Limelight-internal.h"
 static int hookSend(unsigned char*, int, uint8_t, uint32_t, bool);
-static void hookFlush(void) {}
+static int flushes;
+static void hookFlush(void) { ++flushes; }
+static int hookWait(PLINKED_BLOCKING_QUEUE queue, void** data);
 #define sendInputPacketOnControlStream hookSend
 #define flushInputOnControlStream hookFlush
+#define LbqWaitForQueueElement hookWait
 #include "../src/InputStream.c"
 #undef sendInputPacketOnControlStream
 #undef flushInputOnControlStream
+#undef LbqWaitForQueueElement
 #include <stdio.h>
 
 static struct { uint32_t magic; int x, y; } sent[32];
 static int sends, checks, failures;
-static bool injectDuringSend;
+static bool injectDuringSend, injectAfterPop;
 static void check(bool ok, const char* message) {
     ++checks; failures += !ok;
     printf("%s %s\n", ok ? "PASS" : "FAIL", message);
+}
+// The window between the sender popping a mouse holder and latching it under
+// batchedInputMutex: a producer running here sees currentQueuedMousePacket still
+// naming the popped holder and must not coalesce into it.
+static int hookWait(PLINKED_BLOCKING_QUEUE queue, void** data) {
+    int err = LbqWaitForQueueElement(queue, data);
+    if (err == LBQ_SUCCESS && injectAfterPop) {
+        injectAfterPop = false;
+        check(LiSendMouseMoveEvent(17, 19) == 0, "movement queued after the pop");
+        LbqSignalQueueDrain(&packetQueue);
+    }
+    return err;
 }
 static int hookSend(unsigned char* data, int length, uint8_t channel, uint32_t flags, bool more) {
     (void)length; (void)channel; (void)flags; (void)more;
@@ -40,8 +56,9 @@ static int hookSend(unsigned char* data, int length, uint8_t channel, uint32_t f
 }
 static void drain(void) {
     sends = 0;
+    flushes = 0;
     memset(sent, 0, sizeof(sent));
-    if (!injectDuringSend) LbqSignalQueueDrain(&packetQueue);
+    if (!injectDuringSend && !injectAfterPop) LbqSignalQueueDrain(&packetQueue);
     inputSendThreadProc(NULL);
     check(LbqGetItemCount(&packetQueue) == 0, "sender drained all queued input");
     LbqDestroyLinkedBlockingQueue(&packetQueue);
@@ -112,6 +129,21 @@ int main(void) {
     drain();
     check(sends == 3 && sent[0].x == 5 && sent[1].magic == MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5 && sent[2].x == 17,
           "input arriving during network I/O cannot extend the latched mouse batch");
+
+    LiSendMouseMoveEvent(5, 7);
+    injectAfterPop = true;
+    drain();
+    check(sends == 2 && sent[0].x == 5 && sent[0].y == 7 && sent[1].x == 17 && sent[1].y == 19,
+          "movement arriving between the pop and the latch goes into a new holder");
+
+    // A batch that coalesces to nothing sends no packet; the click queued before it
+    // went out with moreData set and must still be flushed.
+    LiSendMouseButtonEvent(BUTTON_ACTION_PRESS, BUTTON_LEFT);
+    LiSendMouseMoveEvent(5, 0);
+    LiSendMouseMoveEvent(-5, 0);
+    drain();
+    check(sends == 1 && sent[0].magic == MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5 && flushes >= 1,
+          "a zero-delta batch flushes the input that preceded it");
 
     packetQueue.sizeBound = 1;
     LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, BUTTON_LEFT);

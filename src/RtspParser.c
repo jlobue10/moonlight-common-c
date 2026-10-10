@@ -109,6 +109,13 @@ int parseRtspMessage(PRTSP_MESSAGE msg, char* rtspMessage, int length) {
             goto ExitFailure;
         }
         statusCode = atoi(token);
+        if (statusCode < 100 || statusCode > 999) {
+            // A non-numeric or zero status would be returned as the handshake's
+            // (success) result and the stage recorded as complete with nothing
+            // negotiated.
+            exitCode = RTSP_ERROR_MALFORMED;
+            goto ExitFailure;
+        }
 
         // Get the status string
         statusStr = strtok_r(NULL, end, &strtokCtx);
