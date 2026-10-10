@@ -1059,6 +1059,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             Limelog("RTSP OPTIONS request failed: %d\n",
                 response.message.response.statusCode);
             ret = response.message.response.statusCode;
+            freeMessage(&response);
             goto Exit;
         }
 
@@ -1079,12 +1080,14 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             Limelog("RTSP DESCRIBE request failed: %d\n",
                 response.message.response.statusCode);
             ret = response.message.response.statusCode;
+            freeMessage(&response);
             goto Exit;
         }
 
         if (!response.payload) {
             Limelog("RTSP DESCRIBE no content in response\n");
             ret = -1;
+            freeMessage(&response);
             goto Exit;
         }
         
@@ -1179,6 +1182,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         // Parse the Opus surround parameters out of the RTSP DESCRIBE response.
         ret = parseOpusConfigurations(&response);
         if (ret != 0) {
+            freeMessage(&response);
             goto Exit;
         }
 
@@ -1205,6 +1209,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             Limelog("RTSP SETUP streamid=audio request failed: %d\n",
                 response.message.response.statusCode);
             ret = response.message.response.statusCode;
+            freeMessage(&response);
             goto Exit;
         }
 
@@ -1229,8 +1234,14 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
 
         // Let the audio stream know the port number is now finalized.
         // NB: This is needed because audio stream init happens before RTSP,
-        // which is not the case for the video stream.
-        notifyAudioPortNegotiationComplete();
+        // which is not the case for the video stream. A failed bind used to be
+        // ignored and left a silent stream polling descriptor -1 forever.
+        ret = notifyAudioPortNegotiationComplete();
+        if (ret != 0) {
+            Limelog("Failed to bind the audio socket: %d\n", ret);
+            freeMessage(&response);
+            goto Exit;
+        }
 
         sessionId = getOptionContent(response.options, "Session");
 
@@ -1282,6 +1293,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             Limelog("RTSP SETUP streamid=video request failed: %d\n",
                 response.message.response.statusCode);
             ret = response.message.response.statusCode;
+            freeMessage(&response);
             goto Exit;
         }
 
@@ -1324,6 +1336,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             Limelog("RTSP SETUP streamid=control request failed: %d\n",
                 response.message.response.statusCode);
             ret = response.message.response.statusCode;
+            freeMessage(&response);
             goto Exit;
         }
 
@@ -1365,6 +1378,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             Limelog("RTSP ANNOUNCE request failed: %d\n",
                 response.message.response.statusCode);
             ret = response.message.response.statusCode;
+            freeMessage(&response);
             goto Exit;
         }
 
@@ -1386,6 +1400,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             Limelog("RTSP PLAY failed: %d\n",
                 response.message.response.statusCode);
             ret = response.message.response.statusCode;
+            freeMessage(&response);
             goto Exit;
         }
 
@@ -1406,6 +1421,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
                 Limelog("RTSP PLAY streamid=video failed: %d\n",
                     response.message.response.statusCode);
                 ret = response.message.response.statusCode;
+                freeMessage(&response);
                 goto Exit;
             }
 
@@ -1426,6 +1442,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
                 Limelog("RTSP PLAY streamid=audio failed: %d\n",
                     response.message.response.statusCode);
                 ret = response.message.response.statusCode;
+                freeMessage(&response);
                 goto Exit;
             }
 
