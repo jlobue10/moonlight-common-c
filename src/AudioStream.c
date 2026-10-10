@@ -446,10 +446,13 @@ int startAudioStream(void* audioContext, int arFlags) {
 
     AudioCallbacks.start();
 
+    // On failure the socket and the ping thread that uses it stay owned by
+    // destroyAudioStream(), which LiStartConnection's unwinding reaches: closing
+    // the socket here left the ping thread sending on a dead descriptor and the
+    // descriptor number closed a second time at teardown (fdsan on Android).
     err = PltCreateThread("AudioRecv", AudioReceiveThreadProc, NULL, &receiveThread);
     if (err != 0) {
         AudioCallbacks.stop();
-        closeSocket(rtpSocket);
         AudioCallbacks.cleanup();
         return err;
     }
@@ -460,7 +463,9 @@ int startAudioStream(void* audioContext, int arFlags) {
             AudioCallbacks.stop();
             PltInterruptThread(&receiveThread);
             PltJoinThread(&receiveThread);
-            closeSocket(rtpSocket);
+            // Packets the receive thread queued meanwhile are freed by destroy; the
+            // queue must be shut down first or its destroy asserts in debug builds.
+            LbqSignalQueueShutdown(&packetQueue);
             AudioCallbacks.cleanup();
             return err;
         }

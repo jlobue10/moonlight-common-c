@@ -2,7 +2,11 @@
 
 static int stage = STAGE_NONE;
 static ConnListenerConnectionTerminated originalTerminationCallback;
-static bool alreadyTerminated;
+#if defined(LC_WINDOWS)
+static volatile LONG alreadyTerminated;
+#else
+static volatile int alreadyTerminated;
+#endif
 static PLT_THREAD terminationCallbackThread;
 static int terminationCallbackErrorCode;
 
@@ -159,20 +163,32 @@ static void ClInternalConnectionTerminated(int errorCode)
 {
     int err;
 
-    // Avoid recursion and issuing multiple callbacks
-    if (alreadyTerminated || ConnectionInterrupted) {
+    // Avoid recursion and issuing multiple callbacks. Two streams can report
+    // termination in the same instant, so the check-and-set is atomic.
+    if (ConnectionInterrupted) {
         return;
     }
+#if defined(LC_WINDOWS)
+    if (InterlockedExchange(&alreadyTerminated, 1) != 0) {
+        return;
+    }
+#else
+    if (__atomic_exchange_n(&alreadyTerminated, 1, __ATOMIC_ACQ_REL) != 0) {
+        return;
+    }
+#endif
 
     terminationCallbackErrorCode = errorCode;
-    alreadyTerminated = true;
 
     // Invoke the termination callback on a separate thread
     err = PltCreateThread("AsyncTerm", terminationCallbackThreadFunc, NULL, &terminationCallbackThread);
     if (err != 0) {
-        // Nothing we can safely do here, so we'll just assert on debug builds
+        // Nothing we can safely do here, so we'll just assert on debug builds.
+        // Detaching the stale handle of a previous session's thread aborts the
+        // process on Bionic, so leave it alone.
         Limelog("Failed to create termination thread: %d\n", err);
         LC_ASSERT(err == 0);
+        return;
     }
 
     // Detach the thread since we never wait on it
