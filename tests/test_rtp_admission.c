@@ -97,6 +97,7 @@ int main(void) {
           delivered == 8, "wrap: a frame at 30000 is delivered");
     check(addPacket(2, 60000, 0, 2, 1, 0) == RTPF_RET_QUEUED && addPacket(2, 60001, 1, 2, 0, 1) == RTPF_RET_QUEUED &&
           delivered == 10, "wrap: a frame at 60000 is delivered");
+    deliveredInOrder = 1; lastDeliveredSeq = 65533;  // the order check is per frame; earlier frames were not contiguous
     check(addPacket(3, 65534, 0, 3, 1, 0) == RTPF_RET_QUEUED, "wrap: first shard");
     check(addPacket(3, 0, 2, 3, 0, 1) == RTPF_RET_QUEUED, "wrap: last shard past the wrap");
     check(addPacket(3, 0, 2, 3, 0, 1) == RTPF_RET_REJECTED, "wrap: duplicate past the wrap rejected");
