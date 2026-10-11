@@ -431,26 +431,33 @@ static bool supportsIdrFrameRequest;
 
 // Initializes the control stream
 int initializeControlStream(void) {
+    int err;
     closeServerCommands();
     stopping = false;
-    if (PltCreateEvent(&idrFrameRequiredEvent) != 0) {
-        return -1;
+    err = PltCreateEvent(&idrFrameRequiredEvent);
+    if (err != 0) {
+        return err;
     }
-    LbqInitializeLinkedBlockingQueue(&referenceFrameControlQueue, 20);
-    LbqInitializeLinkedBlockingQueue(&frameFecStatusQueue, 8); // Limits number of frame status reports per periodic ping interval
+    err = LbqInitializeLinkedBlockingQueue(&referenceFrameControlQueue, 20);
+    if (err != 0) {
+        goto FailEvent;
+    }
+    // Limit the number of frame status reports per periodic ping interval.
+    err = LbqInitializeLinkedBlockingQueue(&frameFecStatusQueue, 8);
+    if (err != 0) {
+        goto FailReferenceQueue;
+    }
     // Steam haptic reports are queued one per packet (a stop must not be coalesced
     // away), so a burst of UI clicks needs more headroom than rumble/LED callbacks.
     // 16 * (7 raw states/stops + 8 conventional states) + HDR = 241 state keys.
     // Ordinary haptic events have a separate 32-entry limit.
-    LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 256);
-    if (PltCreateMutex(&enetMutex) != 0) {
-        // The stage is not advanced on failure, so destroyControlStream() never
-        // runs: release what was created above.
-        LbqDestroyLinkedBlockingQueue(&asyncCallbackQueue);
-        LbqDestroyLinkedBlockingQueue(&frameFecStatusQueue);
-        LbqDestroyLinkedBlockingQueue(&referenceFrameControlQueue);
-        PltCloseEvent(&idrFrameRequiredEvent);
-        return -1;
+    err = LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 256);
+    if (err != 0) {
+        goto FailFecQueue;
+    }
+    err = PltCreateMutex(&enetMutex);
+    if (err != 0) {
+        goto FailAsyncQueue;
     }
 
     encryptedControlStream = APP_VERSION_AT_LEAST(7, 1, 431);
@@ -505,17 +512,27 @@ int initializeControlStream(void) {
         PltDestroyCryptoContext(encryptionCtx);
         PltDestroyCryptoContext(decryptionCtx);
         encryptionCtx = decryptionCtx = NULL;
-        PltDeleteMutex(&enetMutex);
-        LbqDestroyLinkedBlockingQueue(&asyncCallbackQueue);
-        LbqDestroyLinkedBlockingQueue(&frameFecStatusQueue);
-        LbqDestroyLinkedBlockingQueue(&referenceFrameControlQueue);
-        PltCloseEvent(&idrFrameRequiredEvent);
-        return -1;
+        err = -1;
+        goto FailMutex;
     }
     const SS_HDR_METADATA emptyHdrMetadata = {0};
     publishHdrState(false, &emptyHdrMetadata);
 
     return 0;
+
+    // The failed stage is not destroyed by LiStopConnection(). Unwind only
+    // resources whose initialization completed, in reverse acquisition order.
+FailMutex:
+    PltDeleteMutex(&enetMutex);
+FailAsyncQueue:
+    LbqDestroyLinkedBlockingQueue(&asyncCallbackQueue);
+FailFecQueue:
+    LbqDestroyLinkedBlockingQueue(&frameFecStatusQueue);
+FailReferenceQueue:
+    LbqDestroyLinkedBlockingQueue(&referenceFrameControlQueue);
+FailEvent:
+    PltCloseEvent(&idrFrameRequiredEvent);
+    return err;
 }
 
 static void freeBasicLbqList(PLINKED_BLOCKING_QUEUE_ENTRY entry) {

@@ -19,6 +19,14 @@ for test in steam_haptic hdr_state control_truncation video_drain rtp_admission 
         -pthread -o "$build/test-$test"
 done
 "$cc" ${CFLAGS:-} "$repo/tests/test_video_format.c" -o "$build/test-video-format"
+for kind in 1 2 3 4; do
+    "$cc" ${CFLAGS:-} -DINIT_KIND="$kind" -ffunction-sections -fdata-sections -DHAS_SOCKLEN_T \
+        -I"$repo/src" -I"$repo/enet/include" -I"$repo/nanors" -I"$repo/nanors/deps" -I"$repo/nanors/deps/obl" \
+        "$repo/tests/test_stream_init.c" \
+        -L"$build" -lmoonlight-common-c -Wl,--gc-sections -Wl,-rpath,"$build" \
+        -pthread -o "$build/test-stream-init-$kind"
+    "$build/test-stream-init-$kind"
+done
 "$build/test-steam_haptic"
 "$build/test-hdr_state"
 "$build/test-control_truncation"

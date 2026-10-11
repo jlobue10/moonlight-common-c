@@ -59,18 +59,27 @@ static void recordSkippedVideoFrame(void) {
 #define PYROWAVE_RTP_RECV_PACKETS_BUFFERED 8192
 
 // Initialize the video stream
-void initializeVideoStream(void) {
+int initializeVideoStream(void) {
 #ifdef LC_WINDOWS
     InterlockedExchange(&skippedVideoFrames, 0);
 #else
     __atomic_store_n(&skippedVideoFrames, 0, __ATOMIC_RELAXED);
 #endif
-    initializeVideoDepacketizer(StreamConfig.packetSize);
+    int err = initializeVideoDepacketizer(StreamConfig.packetSize);
+    if (err != 0) {
+        return err;
+    }
     RtpvInitializeQueue(&rtpQueue);
     decryptionCtx = PltCreateCryptoContext();
+    if (decryptionCtx == NULL) {
+        RtpvCleanupQueue(&rtpQueue);
+        destroyVideoDepacketizer();
+        return -1;
+    }
     receivedDataFromPeer = false;
     firstDataTimeMs = 0;
     receivedFullFrame = false;
+    return 0;
 }
 
 // Clean up the video stream

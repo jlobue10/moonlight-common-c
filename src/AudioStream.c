@@ -66,8 +66,15 @@ static void AudioPingThreadProc(void* context) {
 
 // Initialize the audio stream and start
 int initializeAudioStream(void) {
-    LbqInitializeLinkedBlockingQueue(&packetQueue, 30);
-    RtpaInitializeQueue(&rtpAudioQueue);
+    int err = LbqInitializeLinkedBlockingQueue(&packetQueue, 30);
+    if (err != 0) {
+        return err;
+    }
+    err = RtpaInitializeQueue(&rtpAudioQueue);
+    if (err != 0) {
+        LbqDestroyLinkedBlockingQueue(&packetQueue);
+        return err;
+    }
     lastSeq = 0;
     receivedDataFromPeer = false;
     pingThreadStarted = false;
