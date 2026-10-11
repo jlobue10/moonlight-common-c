@@ -492,7 +492,9 @@ static void inputSendThreadProc(void* context) {
                     break;
                 }
 
-                // Replace the current packet with the new one
+                // The first packet may carry a button edge. Replacing its
+                // coordinates must not downgrade that edge to lossy delivery.
+                penBatchHolder->enetPacketFlags |= holder->enetPacketFlags;
                 freePacketHolder(holder);
                 holder = penBatchHolder;
             }
@@ -1398,11 +1400,6 @@ int LiSendPenEvent(uint8_t eventType, uint8_t toolType, uint8_t penButtons,
 
     holder->channelId = CTRL_CHANNEL_PEN;
 
-    // Allow move and hover events to be dropped if a newer one arrives (if no buttons changed),
-    // but don't allow state changing events like up/down/leave events to be dropped.
-    holder->enetPacketFlags = (TOUCH_EVENT_IS_BATCHABLE(eventType) && !(penButtons ^ currentPenButtonState)) ? 0 : ENET_PACKET_FLAG_RELIABLE;
-    currentPenButtonState = penButtons;
-
     holder->packet.pen.header.size = BE32(sizeof(SS_PEN_PACKET) - sizeof(uint32_t));
     holder->packet.pen.header.magic = LE32(SS_PEN_MAGIC);
     holder->packet.pen.eventType = eventType;
@@ -1418,7 +1415,15 @@ int LiSendPenEvent(uint8_t eventType, uint8_t toolType, uint8_t penButtons,
     floatToNetfloat(contactAreaMajor, holder->packet.pen.contactAreaMajor);
     floatToNetfloat(contactAreaMinor, holder->packet.pen.contactAreaMinor);
 
+    // Serialize the reliability decision with admission. A rejected edge must
+    // remain pending for the next sample, including with concurrent producers.
+    PltLockMutex(&batchedInputMutex);
+    holder->enetPacketFlags = (TOUCH_EVENT_IS_BATCHABLE(eventType) && penButtons == currentPenButtonState) ? 0 : ENET_PACKET_FLAG_RELIABLE;
     err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
+    if (err == LBQ_SUCCESS) {
+        currentPenButtonState = penButtons;
+    }
+    PltUnlockMutex(&batchedInputMutex);
     if (err != LBQ_SUCCESS) {
         LC_ASSERT(err == LBQ_BOUND_EXCEEDED || err == LBQ_INTERRUPTED);  // interrupted while stopping
         Limelog("Input queue reached maximum size limit\n");
