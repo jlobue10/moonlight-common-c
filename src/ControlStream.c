@@ -548,7 +548,11 @@ static void freeBasicLbqList(PLINKED_BLOCKING_QUEUE_ENTRY entry) {
 // Cleans up control stream
 void destroyControlStream(void) {
     closeServerCommands();
-    LC_ASSERT(stopping);
+    // A later stage (video/input init) can fail after this stream was initialised but
+    // before it was started; LiStopConnection's stage ladder then destroys it without
+    // stopControlStream(). Nothing is running in that case, so mark it stopped rather
+    // than assert an invariant only the started path maintains.
+    stopping = true;
     PltDestroyCryptoContext(encryptionCtx);
     PltDestroyCryptoContext(decryptionCtx);
     PltCloseEvent(&idrFrameRequiredEvent);
