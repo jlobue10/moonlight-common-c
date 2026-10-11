@@ -32,6 +32,7 @@ int main(void) {
     StreamConfig.colorSpace = COLORSPACE_REC_709;
     NegotiatedVideoFormat = VIDEO_FORMAT_H264;
     AudioPacketDuration = 5;
+    VideoPortNumber = 47998;  // fillSdpTail asserts a bound video port in debug builds
 
     int length = 0;
     StreamConfig.bitrate = 2000000;
