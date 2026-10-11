@@ -16,6 +16,7 @@ static void check(int ok, const char* text) { ++checks; printf("%s %s\n", ok ? "
 static RTP_AUDIO_QUEUE queue;
 static unsigned char storage[64][sizeof(RTP_PACKET) + sizeof(AUDIO_FEC_HEADER) + BLOCK];
 static int next;
+static bool wrapTimestamps;
 
 static unsigned char* payloadOf(uint16_t seq, unsigned char* out) {
     for (int i = 0; i < BLOCK; i++) out[i] = (unsigned char)(seq * 7 + i);
@@ -27,7 +28,8 @@ static int addData(uint16_t seq) {
     rtp->header = 0x80;
     rtp->packetType = RTP_PAYLOAD_TYPE_AUDIO;
     rtp->sequenceNumber = seq;
-    rtp->timestamp = seq * AudioPacketDuration;
+    // RTP timestamps continue increasing when the 16-bit sequence number wraps.
+    rtp->timestamp = (seq + (wrapTimestamps && seq < 0x8000 ? 0x10000 : 0)) * AudioPacketDuration;
     rtp->ssrc = 0x1234;
     payloadOf(seq, (unsigned char*)(rtp + 1));
     return RtpaAddPacket(&queue, rtp, sizeof(RTP_PACKET) + BLOCK);
@@ -196,6 +198,38 @@ int main(void) {
     check(maxLive <= 3, "a stream that loses every other block keeps at most a few live blocks");
     check(totalDrained >= 63 * RTPA_DATA_SHARDS, "every retired block is drained (data or loss placeholders) as it is given up");
     RtpaCleanupQueue(&queue);
+
+    // A late block tail must also unblock buffered data beyond a wholly lost
+    // block. Exercise both ordinary sequence numbers and the 16-bit wrap.
+    for (int wrap = 0; wrap < 2; ++wrap) {
+        uint16_t base = wrap ? 65528 : 108;
+        wrapTimestamps = wrap != 0;
+        clockUs = 5000000;
+        RtpaInitializeQueue(&queue);
+        addData((uint16_t)(base - 8));
+        for (int i = -4; i < 0; ++i) addData((uint16_t)(base + i));
+        addData((uint16_t)(base - 1)); // Real late duplicate enables reordering grace.
+        for (int i = 0; i < 3; ++i) addData((uint16_t)(base + i));
+        check(addData((uint16_t)(base + 8)) == 0,
+              "a later block waits for the current block's reordered tail");
+        int status = addData((uint16_t)(base + 3));
+        check(status == RTPQ_RET_PACKET_READY,
+              "late tail unblocks buffered audio across a wholly lost block");
+        drained = 0;
+        // Match AudioStream's caller: HANDLE_NOW does not enter the queue drain.
+        if (status & RTPQ_RET_PACKET_READY) {
+            while ((drainedPacket = RtpaGetQueuedPacket(&queue, 0, &length)) != NULL) {
+                if (drained < 4) seqs[drained] = drainedPacket->sequenceNumber;
+                ++drained;
+                free(drainedPacket);
+            }
+        }
+        check(drained == 2 && seqs[0] == (uint16_t)(base + 3) && seqs[1] == (uint16_t)(base + 8),
+              "late tail and buffered successor reach the decoder without another arrival");
+        check(queue.nextRtpSequenceNumber == (uint16_t)(base + 9) && queue.stats.packetCountFecFailed == 0,
+              "resynchronization across the lost block preserves ordering without extra concealment");
+        RtpaCleanupQueue(&queue);
+    }
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;
