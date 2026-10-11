@@ -89,16 +89,18 @@ int main(void) {
     check(popFrame(&buffers, &zero, &total) == 1 && buffers == 2 && zero == 0 && total == 36 && completeFrames == 2,
           "an empty middle packet queues no zero-length buffer");
 
-    // A short first packet of frame 3 (header only, 8 bytes) carries a last-payload
-    // length of 0; the frame is dropped, and frame 2's value must not survive into it.
+    // A short first packet of frame 3 (4 bytes: no length field at all) must not
+    // let frame 2's last-payload length (20) survive into frame 3: the frame is
+    // dropped instead of being truncated to the previous frame's value. (A payload
+    // this short trips the verify-time asserts, so this test builds without LC_DEBUG.)
     {
-        unsigned char headerOnly[8] = {0x01, 0, 0, 2, 0, 0, 0, 0};
-        deliver(3, 5, 1, 0, headerOnly, sizeof(headerOnly));
-        check(lastPacketPayloadLength == 0, "a new frame's first packet resets the last-payload length");
+        unsigned char shortHeader[4] = {0x01, 0, 0, 2};
+        deliver(3, 5, 1, 0, shortHeader, sizeof(shortHeader));
+        check(lastPacketPayloadLength == 0, "a new frame's first packet resets the last-payload length even when it has no length field");
         unsigned char tail[20] = {0};
         deliver(3, 6, 0, 1, tail, sizeof(tail));
         int rc = popFrame(&buffers, &zero, &total);
-        check(rc != 1 || zero == 0, "a header-only last payload length never yields a zero-length buffer");
+        check(rc == 0, "a frame whose last-payload length is unknown is dropped, not truncated to the previous frame's value");
     }
 
     // Lose frame 4; frame 5 then arrives. Intra-only: no IDR request, counted once, no RFI.

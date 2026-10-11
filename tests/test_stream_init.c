@@ -139,9 +139,8 @@ static int initialize(void) {
 #endif
 }
 static void destroy(void) {
-#if INIT_KIND == 2
-    stopping = true;
-#endif
+    // Destroying an initialised-but-never-started control stream is exactly what
+    // LiStopConnection does after a later stage fails; nothing may be injected here.
     DESTROY();
 }
 static int runFailure(int index) {

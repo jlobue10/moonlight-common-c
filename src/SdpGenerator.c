@@ -366,9 +366,16 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
         err |= addAttributeString(&optionHead, "x-nv-vqos[0].bw.minimumBitrateKbps", payloadStr);
         err |= addAttributeString(&optionHead, "x-nv-vqos[0].bw.maximumBitrateKbps", payloadStr);
 
-        // Send the configured bitrate to Sunshine hosts, so they can adjust for dynamic FEC percentage
+        // Send the configured bitrate to Sunshine hosts, so they can adjust for dynamic FEC percentage.
+        // Vibepollo rejects the ANNOUNCE (400, no fallback) above 800000 kbps; a PyroWave budget
+        // at 4K120 and a high bits-per-pixel setting exceeds that, so cap what we advertise.
         if (IS_SUNSHINE()) {
-            snprintf(payloadStr, sizeof(payloadStr), "%u", StreamConfig.bitrate);
+            unsigned int configuredBitrateKbps = StreamConfig.bitrate;
+            if (configuredBitrateKbps > 800000) {
+                Limelog("Capping advertised configured bitrate from %u to 800000 kbps\n", configuredBitrateKbps);
+                configuredBitrateKbps = 800000;
+            }
+            snprintf(payloadStr, sizeof(payloadStr), "%u", configuredBitrateKbps);
             err |= addAttributeString(&optionHead, "x-ml-video.configuredBitrateKbps", payloadStr);
         }
     }
