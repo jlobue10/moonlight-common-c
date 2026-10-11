@@ -124,14 +124,16 @@ int main(void) {
             while ((packet = RtpaGetQueuedPacket(&queue, 1, &length)) != NULL) free(packet);
         }
         clockUs += 5000;
-        check(addData(109) == RTPQ_RET_HANDLE_NOW, "late audio inside the full grace is still delivered");
+        // 110..112 are already buffered behind 109: it is reported ready with them, not
+        // handed over alone (which left the successors waiting for the next arrival).
+        check(addData(109) == RTPQ_RET_PACKET_READY, "late audio inside the full grace is delivered with its buffered successors");
         int delivered = 0;
         PRTP_PACKET packet;
         while ((packet = RtpaGetQueuedPacket(&queue, 0, &length)) != NULL) {
             if (length != 0) ++delivered;
             free(packet);
         }
-        check(delivered == 3 && queue.stats.packetCountFecFailed == 0,
+        check(delivered == 4 && queue.stats.packetCountFecFailed == 0,
               "reordered audio drains in order without loss concealment");
         RtpaCleanupQueue(&queue);
 
@@ -144,6 +146,57 @@ int main(void) {
               queue.stats.packetCountFecFailed == 1, "a genuinely lost packet expires after the full grace");
         RtpaCleanupQueue(&queue);
     }
+
+    // A gap filled behind buffered successors drains them at once (C23-03), including
+    // across a block boundary; an in-order packet with nothing behind it is still fast.
+    AudioPacketDuration = 5;
+    clockUs = 3000000;
+    RtpaInitializeQueue(&queue);
+    addData(100);
+    for (int seq = 104; seq <= 107; ++seq) addData((uint16_t)seq);
+    check(addData(108) == RTPQ_RET_HANDLE_NOW, "an in-order packet with nothing buffered behind it is handed over at once");
+    check(addData(110) == 0 && addData(111) == 0, "packets behind a gap wait");
+    check(addData(109) == RTPQ_RET_PACKET_READY, "the packet that fills the gap is reported ready with its successors");
+    int seqs[4] = {0}; int drained = 0;
+    PRTP_PACKET drainedPacket;
+    while ((drainedPacket = RtpaGetQueuedPacket(&queue, 0, &length)) != NULL) {
+        if (drained < 4) seqs[drained] = drainedPacket->sequenceNumber;
+        ++drained;
+        free(drainedPacket);
+    }
+    check(drained == 3 && seqs[0] == 109 && seqs[1] == 110 && seqs[2] == 111, "the gap filler and both successors drain in order");
+    for (int seq = 112; seq <= 114; ++seq) addData((uint16_t)seq);
+    // No reorder grace yet: 116 makes the queue give 115 up at once (a placeholder is ready);
+    // when 115 then arrives late it is still reported ready together with the buffered 116.
+    check((addData(116) & RTPQ_RET_PACKET_READY) && addData(115) == RTPQ_RET_PACKET_READY, "a successor buffered in the next block is drained with the block's last packet");
+    drained = 0;
+    while ((drainedPacket = RtpaGetQueuedPacket(&queue, 0, &length)) != NULL) { ++drained; free(drainedPacket); }
+    check(drained == 2, "the block boundary is crossed in one drain");
+    RtpaCleanupQueue(&queue);
+
+    // One data packet every other block (a whole block lost in between) with the consumer
+    // draining between adds: after the head block is given up, the next packet precedes the
+    // new head, and only an add used to resynchronise, so every second block stayed live and
+    // the backlog grew with the stream (half of 300 adds; bounded only by the 16-bit ring).
+    // Draining must move on to the oldest block itself (C23-01).
+    clockUs = 4000000;
+    RtpaInitializeQueue(&queue);
+    addData(100);
+    for (int seq = 104; seq <= 107; ++seq) addData((uint16_t)seq);
+    int maxLive = 0, totalDrained = 0;
+    for (int block = 0; block < 64; ++block) {
+        int status = addData((uint16_t)(108 + block * 2 * RTPA_DATA_SHARDS));
+        if (status & RTPQ_RET_PACKET_READY) {
+            while ((drainedPacket = RtpaGetQueuedPacket(&queue, 0, &length)) != NULL) { free(drainedPacket); ++totalDrained; }
+        }
+        int live = 0;
+        for (PRTPA_FEC_BLOCK b = queue.blockHead; b != NULL; b = b->next) ++live;
+        if (live > maxLive) maxLive = live;
+    }
+    check(maxLive <= 3, "a stream that loses every other block keeps at most a few live blocks");
+    check(totalDrained >= 63 * RTPA_DATA_SHARDS, "every retired block is drained (data or loss placeholders) as it is given up");
+    RtpaCleanupQueue(&queue);
+
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;
 }

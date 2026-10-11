@@ -702,6 +702,13 @@ static int parseOpusConfigFromParamString(char* paramStr, int channelCount, POPU
     opusConfig->coupledStreams = CHAR_TO_INT(*paramStr);
     paramStr++;
 
+    // Host data: an Opus multistream decoder needs at least one stream, and a coupled
+    // stream is one of the streams (startAudioStream asserted streams != 0 in debug).
+    if (opusConfig->streams == 0 || opusConfig->coupledStreams > opusConfig->streams) {
+        Limelog("Invalid Opus stream layout: %d streams, %d coupled\n", opusConfig->streams, opusConfig->coupledStreams);
+        return -4;
+    }
+
     for (i = 0; i < opusConfig->channelCount; i++) {
         if (!CHAR_IS_DIGIT(*paramStr)) {
             Limelog("Invalid mapping value at %d: %c\n", i, *paramStr);
@@ -780,7 +787,7 @@ static int parseOpusConfigurations(PRTSP_MESSAGE response) {
             // Parse the normal quality Opus config
             err = parseOpusConfigFromParamString(paramStart, channelCount, &NormalQualityOpusConfig);
             if (err != 0) {
-                LC_ASSERT(err == 0);
+                // Host data, not an invariant: fail the stage, do not assert.
                 return err;
             }
 
@@ -809,7 +816,6 @@ static int parseOpusConfigurations(PRTSP_MESSAGE response) {
                 // Parse the high quality Opus config
                 err = parseOpusConfigFromParamString(paramStart, channelCount, &HighQualityOpusConfig);
                 if (err != 0) {
-                    LC_ASSERT(err == 0);
                     return err;
                 }
 
@@ -941,6 +947,14 @@ bool parseSdpAttributeToInt(const char* payload, const char* name, int* val) {
     return true;
 }
 
+// ENet RTSP is used for the GFE generations that need it; it cannot carry the
+// encrypted RTSP envelope (the ENet transport handles the payload itself), so a
+// host that advertises rtspenc:// is spoken to over TCP whatever its version says.
+// Both inputs are host-supplied; the combination used to hit a debug assert.
+static bool rtspOverEnet(const int* appVersionQuad, bool encryptedRtsp) {
+    return (appVersionQuad[0] >= 5) && (appVersionQuad[0] <= 7) && (appVersionQuad[2] < 404) && !encryptedRtsp;
+}
+
 // Perform RTSP Handshake with the streaming server machine as part of the connection process
 int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
     int ret;
@@ -948,12 +962,12 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
     LC_ASSERT(RtspPortNumber != 0);
 
     // Initialize global state
-    useEnet = (AppVersionQuad[0] >= 5) && (AppVersionQuad[0] <= 7) && (AppVersionQuad[2] < 404);
+    encryptedRtspEnabled = serverInfo->rtspSessionUrl && strstr(serverInfo->rtspSessionUrl, "rtspenc://");
+    useEnet = rtspOverEnet(AppVersionQuad, encryptedRtspEnabled);
     currentSeqNumber = 1;
     hasSessionId = false;
     controlStreamId = APP_VERSION_AT_LEAST(7, 1, 431) ? "streamid=control/13/0" : "streamid=control/1/0";
     AudioEncryptionEnabled = false;
-    encryptedRtspEnabled = serverInfo->rtspSessionUrl && strstr(serverInfo->rtspSessionUrl, "rtspenc://");
     encryptionCtx = PltCreateCryptoContext();
     decryptionCtx = PltCreateCryptoContext();
 

@@ -536,22 +536,31 @@ static bool queueHasPacketReady(PRTP_AUDIO_QUEUE queue) {
             || queue->blockHead->allowDiscontinuity);
 }
 
+// If the packet we're waiting on precedes our earliest FEC block, a previous FEC block was completely lost.
+// We should resynchronize immediately by advancing the queue state to play our oldest block next.
+//
+// NB: We do NOT want to set allowDiscontinuity here, because that will result in playing back the entire
+// FEC block immediately but we've only received a single packet from that block. Worse still, when the
+// remaining packets from this block arrive, they will trigger the OOS detection and kick us out of fast
+// audio recovery mode.
+//
+// Returns true when the queue was moved to the oldest block.
+static bool resyncToOldestBlock(PRTP_AUDIO_QUEUE queue) {
+    if (queue->blockHead != NULL && isBefore16(queue->nextRtpSequenceNumber, queue->blockHead->fecHeader.baseSequenceNumber)) {
+        queue->nextRtpSequenceNumber = queue->blockHead->fecHeader.baseSequenceNumber;
+        queue->oldestRtpBaseSequenceNumber = queue->blockHead->fecHeader.baseSequenceNumber;
+        return true;
+    }
+    return false;
+}
+
 static void handleMissingPackets(PRTP_AUDIO_QUEUE queue) {
     // Nothing to do for an empty queue
     if (queue->blockHead == NULL) {
         return;
     }
 
-    // If the packet we're waiting on precedes our earliest FEC block, a previous FEC block was completely lost.
-    // We should resynchronize immediately by advancing the queue state to play our oldest block next.
-    //
-    // NB: We do NOT want to set allowDiscontinuity here, because that will result in playing back the entire
-    // FEC block immediately but we've only received a single packet from that block. Worse still, when the
-    // remaining packets from this block arrive, they will trigger the OOS detection and kick us out of fast
-    // audio recovery mode.
-    if (isBefore16(queue->nextRtpSequenceNumber, queue->blockHead->fecHeader.baseSequenceNumber)) {
-        queue->nextRtpSequenceNumber = queue->blockHead->fecHeader.baseSequenceNumber;
-        queue->oldestRtpBaseSequenceNumber = queue->blockHead->fecHeader.baseSequenceNumber;
+    if (resyncToOldestBlock(queue)) {
         return;
     }
 
@@ -624,7 +633,16 @@ int RtpaAddPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACKET packet, uint16_t length) {
 
         // This is the common case - an in-order receive of the next data shard.
         // We handle this quickly by telling the caller to immediately consume it.
-        if (packet->sequenceNumber == queue->nextRtpSequenceNumber) {
+        //
+        // Not when this packet filled a gap behind successors that are already
+        // buffered: handing only this one over would leave the buffered ones
+        // waiting one packet interval for the next arrival. The slow path below
+        // reports them ready so the caller drains all of them now.
+        const bool successorBuffered = (pos + 1 < RTPA_DATA_SHARDS)
+            ? fecBlock->marks[pos + 1] == 0
+            : (fecBlock->next != NULL && fecBlock->next->marks[0] == 0 &&
+               fecBlock->next->fecHeader.baseSequenceNumber == U16(fecBlock->fecHeader.baseSequenceNumber + RTPA_DATA_SHARDS));
+        if (packet->sequenceNumber == queue->nextRtpSequenceNumber && !successorBuffered) {
             queue->nextRtpSequenceNumber = packet->sequenceNumber + 1;
 
             // We are going to return this entry, so update the FEC block
@@ -715,6 +733,11 @@ PRTP_PACKET RtpaGetQueuedPacket(PRTP_AUDIO_QUEUE queue, uint16_t customHeaderLen
         // If we've read everything from this FEC block, remove and free it
         if (nextBlock->nextDataPacketIndex == RTPA_DATA_SHARDS) {
             freeFecBlockHead(queue);
+            // The next block may start past a wholly lost one: move on to it now
+            // rather than at the next add, or a stream that loses most of every
+            // block (one data packet per block) retires one block per two adds
+            // and the backlog grows to the sequence ring (~8k blocks).
+            resyncToOldestBlock(queue);
         }
         else {
             validateFecBlockState(queue);
@@ -742,6 +765,7 @@ PRTP_PACKET RtpaGetQueuedPacket(PRTP_AUDIO_QUEUE queue, uint16_t customHeaderLen
         // If we've read everything from this FEC block, remove and free it
         if (nextBlock->nextDataPacketIndex == RTPA_DATA_SHARDS) {
             freeFecBlockHead(queue);
+            resyncToOldestBlock(queue);  // see above
         }
         else {
             validateFecBlockState(queue);
