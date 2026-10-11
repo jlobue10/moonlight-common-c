@@ -780,9 +780,11 @@ static bool decryptControlMessageToV1(PNVCTL_ENCRYPTED_PACKET_HEADER encPacket, 
     // It must be an encrypted packet to begin with
     LC_ASSERT(encPacket->encryptedHeaderType == 0x0001);
 
-    // Make sure the host isn't lying to us about the packet length
+    // Make sure the host isn't lying to us about the packet length. The outer length is
+    // unauthenticated host data: a padded datagram must not abort a debug client, only a
+    // short one is rejected (the decrypt below stays within encPacket->length).
     int expectedEncLength = encPacket->length + sizeof(encPacket->encryptedHeaderType) + sizeof(encPacket->length);
-    LC_ASSERT(encPacketLength == expectedEncLength);
+    LC_ASSERT_VT(encPacketLength == expectedEncLength);
     if (encPacketLength < expectedEncLength) {
         Limelog("Length exceeds packet boundary (needed %d, got %d)\n", expectedEncLength, encPacketLength);
         return false;
@@ -1613,7 +1615,7 @@ static void lossStatsThreadFunc(void* context) {
     BYTE_BUFFER byteBuffer;
 
     if (usePeriodicPing) {
-        char periodicPingPayload[8];
+        char periodicPingPayload[8] = {0};  // 6 bytes written, 8 sent: no uninitialised tail
 
         BbInitializeWrappedBuffer(&byteBuffer, periodicPingPayload, 0, sizeof(periodicPingPayload), BYTE_ORDER_LITTLE);
         BbPut16(&byteBuffer, 4); // Length of payload
