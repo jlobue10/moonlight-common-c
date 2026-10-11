@@ -27,6 +27,17 @@ int main(void) {
     check(LiSendMultiControllerEvent(0, 1, 0x1000, 0, 0, 0, 0, 0, 0) == 0, "controller 0 is queued");
     check(LiSendMultiControllerEvent(15, 0x8000, 0, 0, 0, 0, 0, 0, 0) == 0, "controller 15 is queued");
 
+    AppVersionQuad[3] = -1; // Sunshine carries the high half of the button word.
+    const int clicks = LEFT_PAD_CLICK_FLAG | RIGHT_TRIGGER_CLICK_FLAG;
+    check(LiSendMultiControllerEvent(2, 4, clicks | TOUCHPAD_FLAG, 255, 0, 0, 0, 0, 0) == 0,
+          "physical SC2026 clicks are queued");
+    PPACKET_HOLDER pressed = currentQueuedControllerPacket[2];
+    check(pressed && pressed->packet.multiController.buttonFlags2 == LE16((short)((clicks | TOUCHPAD_FLAG) >> 16)),
+          "pad and trigger clicks survive the high button word");
+    check(LiSendMultiControllerEvent(2, 4, 0, 255, 0, 0, 0, 0, 0) == 0 &&
+          currentQueuedControllerPacket[2] != pressed && pressed->packet.multiController.buttonFlags2 != 0,
+          "physical click release cannot coalesce away a press with unchanged analog triggers");
+
     initialized = false;
     // No sender thread is started by this fixture; close both queues explicitly.
     LbqSignalQueueShutdown(&packetHolderFreeList);
