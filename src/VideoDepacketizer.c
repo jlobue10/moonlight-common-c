@@ -96,6 +96,19 @@ static void cleanupFrameState(void) {
 }
 
 // Cleanup frame state and set that we're waiting for an IDR Frame
+// PyroWave is intra-only: every frame is a full refresh, so a lost frame needs no
+// IDR request from this side (the host documents the request as a no-op) and the
+// frame after a loss is simply decoded.
+static bool pyrowaveIntraOnly(void) {
+    return (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) != 0;
+}
+
+static void requestIdrForLoss(void) {
+    if (!pyrowaveIntraOnly()) {
+        LiRequestIdrFrame();
+    }
+}
+
 static void dropFrameState(void) {
     // This may only be called at frame boundaries
     LC_ASSERT(!decodingFrame);
@@ -125,7 +138,7 @@ static void dropFrameState(void) {
 
         // Request an IDR frame
         waitingForIdrFrame = true;
-        LiRequestIdrFrame();
+        requestIdrForLoss();
     }
 
     cleanupFrameState();
@@ -805,7 +818,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
         nextFrameNumber = frameIndex + 1;
         dropFrameState();
         if (waitingForIdrFrame) {
-            LiRequestIdrFrame();
+            requestIdrForLoss();
         }
         else {
             connectionDetectedFrameLoss(startFrameNumber, frameIndex);
@@ -919,7 +932,9 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
         }
 
         // Codecs like H.264 and HEVC handle the FEC trailing zero padding just fine, but other
-        // codecs need the exact length encoded separately.
+        // codecs need the exact length encoded separately. Reset it per frame so a short
+        // first packet cannot inherit the previous frame's value.
+        lastPacketPayloadLength = 0;
         LC_ASSERT_VT(currentPos.length >= 6);
         if (!(NegotiatedVideoFormat & (VIDEO_FORMAT_MASK_H264 | VIDEO_FORMAT_MASK_H265)) && currentPos.length >= 6) {
             BYTE_BUFFER bb;
@@ -1021,7 +1036,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
                 nextFrameNumber = frameIndex + 1;
                 dropFrameState();
                 if (waitingForIdrFrame) {
-                    LiRequestIdrFrame();
+                    requestIdrForLoss();
                 }
                 else {
                     connectionDetectedFrameLoss(startFrameNumber, frameIndex);
@@ -1054,7 +1069,9 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
             }
 #endif
 
-            queueFragment(existingEntry, currentPos.data, currentPos.offset, currentPos.length);
+            if (currentPos.length > 0) {
+                queueFragment(existingEntry, currentPos.data, currentPos.offset, currentPos.length);
+            }
         }
     }
     else {
@@ -1087,7 +1104,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
                 nextFrameNumber = frameIndex + 1;
                 dropFrameState();
                 if (waitingForIdrFrame) {
-                    LiRequestIdrFrame();
+                    requestIdrForLoss();
                 }
                 else {
                     connectionDetectedFrameLoss(startFrameNumber, frameIndex);
@@ -1097,8 +1114,13 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
             }
         }
 
-        // Other codecs are just passed through as is.
-        queueFragment(existingEntry, currentPos.data, currentPos.offset, currentPos.length);
+        // Other codecs are just passed through as is. An empty packet (a middle
+        // packet of exactly the NV header, or a last packet whose declared payload
+        // length covers only the frame header) queues no fragment: the decode
+        // unit's buffers promise a length that is never <= 0.
+        if (currentPos.length > 0) {
+            queueFragment(existingEntry, currentPos.data, currentPos.offset, currentPos.length);
+        }
     }
 
     if (lastPacket) {
@@ -1117,7 +1139,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
                 // detection of the recovery of the network. Requesting an IDR frame while
                 // the network is unstable will just contribute to congestion collapse.
                 if (waitingForNextSuccessfulFrame) {
-                    LiRequestIdrFrame();
+                    requestIdrForLoss();
                 }
             }
             else {
@@ -1168,6 +1190,14 @@ void notifyFrameLost(unsigned int frameNumber, bool speculative) {
 
     // Drop state and determine if we need an IDR frame or if RFI is okay
     dropFrameState();
+
+    if (pyrowaveIntraOnly()) {
+        // Nothing to invalidate and nothing to request: the next frame is a full
+        // refresh. Advance past the lost frame so its successor is not counted as
+        // a second drop when it arrives.
+        nextFrameNumber = frameNumber + 1;
+        return;
+    }
 
     // If dropFrameState() determined that RFI was usable, issue it now
     if (!waitingForIdrFrame) {

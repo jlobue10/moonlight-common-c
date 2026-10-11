@@ -433,7 +433,9 @@ static bool supportsIdrFrameRequest;
 int initializeControlStream(void) {
     closeServerCommands();
     stopping = false;
-    PltCreateEvent(&idrFrameRequiredEvent);
+    if (PltCreateEvent(&idrFrameRequiredEvent) != 0) {
+        return -1;
+    }
     LbqInitializeLinkedBlockingQueue(&referenceFrameControlQueue, 20);
     LbqInitializeLinkedBlockingQueue(&frameFecStatusQueue, 8); // Limits number of frame status reports per periodic ping interval
     // Steam haptic reports are queued one per packet (a stop must not be coalesced
@@ -441,7 +443,9 @@ int initializeControlStream(void) {
     // 16 * (7 raw states/stops + 8 conventional states) + HDR = 241 state keys.
     // Ordinary haptic events have a separate 32-entry limit.
     LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 256);
-    PltCreateMutex(&enetMutex);
+    if (PltCreateMutex(&enetMutex) != 0) {
+        return -1;
+    }
 
     encryptedControlStream = APP_VERSION_AT_LEAST(7, 1, 431);
 
@@ -491,6 +495,9 @@ int initializeControlStream(void) {
     usePeriodicPing = APP_VERSION_AT_LEAST(7, 1, 415);
     encryptionCtx = PltCreateCryptoContext();
     decryptionCtx = PltCreateCryptoContext();
+    if (encryptionCtx == NULL || decryptionCtx == NULL) {
+        return -1;
+    }
     const SS_HDR_METADATA emptyHdrMetadata = {0};
     publishHdrState(false, &emptyHdrMetadata);
 
