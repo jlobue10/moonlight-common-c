@@ -410,6 +410,9 @@ int startVideoStream(void* rendererContext, int drFlags) {
         err = PltCreateThread("VideoDec", VideoDecoderThreadProc, NULL, &decoderThread);
         if (err != 0) {
             VideoCallbacks.stop();
+            // The receiver may already have queued frames. This stage will be
+            // destroyed without stopVideoStream(), so retire its queue here.
+            stopVideoDepacketizer();
             PltInterruptThread(&receiveThread);
             PltJoinThread(&receiveThread);
             closeSocket(rtpSocket);
