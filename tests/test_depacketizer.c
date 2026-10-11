@@ -70,7 +70,7 @@ static int popFrame(int* buffers, int* zeroLength, int* total) {
         *total += e->length;
     }
     int ok = qdu->decodeUnit.fullLength == *total;
-    freeDecodeUnitList(&qdu->entry);
+    LiCompleteVideoFrame(qdu, DR_OK);  // the production return path (also marks the IDR as processed)
     return ok ? 1 : -1;
 }
 
@@ -104,6 +104,7 @@ int main(void) {
     check(popFrame(&buffers, &zero, &total) == 1 && idrRequests == 0 && consecutiveFrameDrops == 0,
           "the frame after a loss decodes and clears the drop count");
 
+    stopVideoDepacketizer();  // destroy asserts a stopped or empty queue
     destroyVideoDepacketizer();
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;
