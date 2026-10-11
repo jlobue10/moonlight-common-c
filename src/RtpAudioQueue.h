@@ -78,7 +78,7 @@ typedef struct _RTP_AUDIO_QUEUE {
 #define RTPQ_PACKET_READY(x)    ((x) & RTPQ_RET_PACKET_READY)
 #define RTPQ_HANDLE_NOW(x)      ((x) == RTPQ_RET_HANDLE_NOW)
 
-void RtpaInitializeQueue(PRTP_AUDIO_QUEUE queue);
+int RtpaInitializeQueue(PRTP_AUDIO_QUEUE queue);
 void RtpaCleanupQueue(PRTP_AUDIO_QUEUE queue);
 int RtpaAddPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACKET packet, uint16_t length);
 PRTP_PACKET RtpaGetQueuedPacket(PRTP_AUDIO_QUEUE queue, uint16_t customHeaderLength, uint16_t* length);

@@ -59,8 +59,11 @@ typedef struct _LENTRY_INTERNAL {
 #define HEVC_NAL_TYPE_SEI 39
 
 // Init
-void initializeVideoDepacketizer(int pktSize) {
-    LbqInitializeLinkedBlockingQueue(&decodeUnitQueue, 15);
+int initializeVideoDepacketizer(int pktSize) {
+    int err = LbqInitializeLinkedBlockingQueue(&decodeUnitQueue, 15);
+    if (err != 0) {
+        return err;
+    }
 
     nextFrameNumber = 1;
     startFrameNumber = 0;
@@ -78,6 +81,7 @@ void initializeVideoDepacketizer(int pktSize) {
     dropStatePending = false;
     idrFrameProcessed = false;
     strictIdrFrameWait = !isReferenceFrameInvalidationEnabled();
+    return 0;
 }
 
 // Free the NAL chain

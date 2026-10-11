@@ -92,12 +92,8 @@ static PPACKET_HOLDER currentQueuedMousePacket;
 
 // Initializes the input stream
 int initializeInputStream(void) {
+    int err;
     memcpy(currentAesIv, StreamConfig.remoteInputAesIv, sizeof(currentAesIv));
-
-    // Set a high maximum queue size limit to ensure input isn't dropped
-    // while the input send thread is blocked for short periods.
-    LbqInitializeLinkedBlockingQueue(&packetQueue, MAX_QUEUED_INPUT_PACKETS);
-    LbqInitializeLinkedBlockingQueue(&packetHolderFreeList, MAX_QUEUED_INPUT_PACKETS);
 
     // Reset the batching state before anything here can fail: destroyInputStream()
     // freed the holders the previous session left queued, and a stale pointer
@@ -106,18 +102,26 @@ int initializeInputStream(void) {
     memset(currentGamepadSensorState, 0, sizeof(currentGamepadSensorState));
     currentQueuedMousePacket = NULL;
     stopping = false;
-    if (PltCreateMutex(&batchedInputMutex) != 0) {
-        LbqDestroyLinkedBlockingQueue(&packetQueue);
-        LbqDestroyLinkedBlockingQueue(&packetHolderFreeList);
-        return -1;
+
+    // Set a high maximum queue size limit to ensure input isn't dropped
+    // while the input send thread is blocked for short periods.
+    err = LbqInitializeLinkedBlockingQueue(&packetQueue, MAX_QUEUED_INPUT_PACKETS);
+    if (err != 0) {
+        return err;
+    }
+    err = LbqInitializeLinkedBlockingQueue(&packetHolderFreeList, MAX_QUEUED_INPUT_PACKETS);
+    if (err != 0) {
+        goto FailPacketQueue;
+    }
+    err = PltCreateMutex(&batchedInputMutex);
+    if (err != 0) {
+        goto FailFreeList;
     }
 
     cryptoContext = PltCreateCryptoContext();
     if (cryptoContext == NULL) {
-        PltDeleteMutex(&batchedInputMutex);
-        LbqDestroyLinkedBlockingQueue(&packetQueue);
-        LbqDestroyLinkedBlockingQueue(&packetHolderFreeList);
-        return -1;
+        err = -1;
+        goto FailMutex;
     }
     encryptedControlStream = APP_VERSION_AT_LEAST(7, 1, 431);
 
@@ -136,6 +140,14 @@ int initializeInputStream(void) {
     absCurrentPosX = absCurrentPosY = 0.5f;
 
     return 0;
+
+FailMutex:
+    PltDeleteMutex(&batchedInputMutex);
+FailFreeList:
+    LbqDestroyLinkedBlockingQueue(&packetHolderFreeList);
+FailPacketQueue:
+    LbqDestroyLinkedBlockingQueue(&packetQueue);
+    return err;
 }
 
 // Destroys and cleans up the input stream

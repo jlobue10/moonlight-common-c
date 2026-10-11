@@ -481,7 +481,12 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
 
     Limelog("Initializing video stream...");
     ListenerCallbacks.stageStarting(STAGE_VIDEO_STREAM_INIT);
-    initializeVideoStream();
+    err = initializeVideoStream();
+    if (err != 0) {
+        Limelog("failed: %d\n", err);
+        ListenerCallbacks.stageFailed(STAGE_VIDEO_STREAM_INIT, err);
+        goto Cleanup;
+    }
     stage++;
     LC_ASSERT(stage == STAGE_VIDEO_STREAM_INIT);
     ListenerCallbacks.stageComplete(STAGE_VIDEO_STREAM_INIT);
