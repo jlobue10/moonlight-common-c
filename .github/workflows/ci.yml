@@ -73,12 +73,15 @@ jobs:
             cmake_args: -DUSE_MBEDTLS=ON
             prebuild_cmd: sudo apt install -y libmbedtls-dev
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     name: Build
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Prebuild
         if: matrix.prebuild_cmd

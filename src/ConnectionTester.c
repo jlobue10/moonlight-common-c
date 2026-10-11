@@ -80,6 +80,10 @@ unsigned short LiGetPortFromPortFlagIndex(int portFlagIndex)
 
 void LiStringifyPortFlags(unsigned int portFlags, const char* separator, char* outputBuffer, int outputBufferLength)
 {
+    // Only the defined ports can be named (ML_PORT_FLAG_ALL and stale bits would otherwise
+    // reach LiGetPortFromPortFlagIndex's assert / "TCP 0").
+    portFlags &= VALID_PORT_FLAG_MASK;
+
     // Initialize the output buffer to an empty string
     outputBuffer[0] = 0;
 

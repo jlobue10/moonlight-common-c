@@ -5,9 +5,11 @@ on:
   push:
     branches:
       - master
+      - pyrowave
   pull_request:
     branches:
       - master
+      - pyrowave
   schedule:
     - cron: '43 20 * * 3'
 
@@ -38,13 +40,14 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         submodules: 'recursive'
+        persist-credentials: false
 
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v2
+      uses: github/codeql-action/init@v3
       with:
         build-mode: none
         languages: ${{ matrix.language }}
@@ -62,7 +65,7 @@ jobs:
       # CodeQL now supports no build mode for C++
       # See: https://github.blog/changelog/2025-06-03-codeql-can-be-enabled-at-scale-on-c-c-repositories-in-public-preview-using-build-free-scanning/
       if: false
-      uses: github/codeql-action/autobuild@v2
+      uses: github/codeql-action/autobuild@v3
 
     # ℹ️ Command-line programs to run using the OS shell.
     # 📚 See https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idstepsrun
@@ -75,6 +78,6 @@ jobs:
     #     ./location_of_script_within_repo/buildscript.sh
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v2
+      uses: github/codeql-action/analyze@v3
       with:
         category: "/language:${{matrix.language}}"
