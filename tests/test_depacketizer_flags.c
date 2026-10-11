@@ -96,6 +96,17 @@ int main(void) {
     goodFrame(7, 12);
     check(popped <= 1 && popFrames() == 1, "a missing EOF followed by a new SOF does not abort and the stream recovers");
 
+    // 4. A frame whose last packet lacks EOF, then the RTP queue reports the next frame lost
+    //    (an unrecoverable FEC block): the open frame is closed, not asserted on.
+    deliver(8, 14, 1, 0, first, sizeof(first));
+    deliver(8, 15, 0, 0, last, sizeof(last));
+    check(decodingFrame, "an unterminated frame stays open until the next boundary");
+    notifyFrameLost(9, false);
+    check(!decodingFrame, "a loss notification closes an unterminated frame instead of asserting");
+    check(nextFrameNumber == 10, "intra-only PyroWave skips the lost frame and requests nothing");
+    goodFrame(10, 16);
+    check(popFrames() == 1, "the next good frame after the loss reassembles");
+
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;
 }
