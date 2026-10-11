@@ -637,11 +637,11 @@ int RtpaAddPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACKET packet, uint16_t length) {
         // Not when this packet filled a gap behind successors that are already
         // buffered: handing only this one over would leave the buffered ones
         // waiting one packet interval for the next arrival. The slow path below
-        // reports them ready so the caller drains all of them now.
+        // reports them ready so the caller drains all of them now, including a
+        // later block reached by resynchronizing past a wholly lost block.
         const bool successorBuffered = (pos + 1 < RTPA_DATA_SHARDS)
             ? fecBlock->marks[pos + 1] == 0
-            : (fecBlock->next != NULL && fecBlock->next->marks[0] == 0 &&
-               fecBlock->next->fecHeader.baseSequenceNumber == U16(fecBlock->fecHeader.baseSequenceNumber + RTPA_DATA_SHARDS));
+            : (fecBlock->next != NULL && fecBlock->next->marks[0] == 0);
         if (packet->sequenceNumber == queue->nextRtpSequenceNumber && !successorBuffered) {
             queue->nextRtpSequenceNumber = packet->sequenceNumber + 1;
 
