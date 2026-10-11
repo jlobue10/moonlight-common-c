@@ -566,7 +566,8 @@ static void handleMissingPackets(PRTP_AUDIO_QUEUE queue) {
     // At this point, we know we've got a second FEC block queued up waiting on the first one to complete.
     // If we've never seen OOS data from this host, we'll assume the first one is lost and skip forward.
     // If we have seen OOS data, we'll wait for a little while longer to see if OOS packets arrive before giving up.
-    if (!queue->receivedOosData || PltGetMicroseconds() - queue->blockHead->queueTimeUs > (uint64_t)(AudioPacketDuration * RTPA_DATA_SHARDS) + (RTPQ_OOS_WAIT_TIME_MS * 1000)) {
+    const uint64_t reorderWaitUs = ((uint64_t)AudioPacketDuration * RTPA_DATA_SHARDS + RTPQ_OOS_WAIT_TIME_MS) * 1000;
+    if (!queue->receivedOosData || PltGetMicroseconds() - queue->blockHead->queueTimeUs > reorderWaitUs) {
         LC_ASSERT(!isBefore16(queue->nextRtpSequenceNumber, queue->blockHead->fecHeader.baseSequenceNumber));
 
         queue->stats.packetCountFecFailed++;

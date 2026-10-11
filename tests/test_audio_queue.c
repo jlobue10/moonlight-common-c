@@ -2,7 +2,12 @@
 // lost data shard from a parity shard, and the bound on how far ahead a parity
 // shard may open a block (an unauthenticated far-future base used to make the
 // queue abandon the current block at once).
+#include "../src/Limelight-internal.h"
+static uint64_t clockUs = 1000000;
+static uint64_t testMicroseconds(void) { return clockUs; }
+#define PltGetMicroseconds testMicroseconds
 #include "../src/RtpAudioQueue.c"
+#undef PltGetMicroseconds
 
 static int checks, failures;
 static void check(int ok, const char* text) { ++checks; printf("%s %s\n", ok ? "PASS" : "FAIL", text); failures += !ok; }
@@ -98,6 +103,47 @@ int main(void) {
           "a parity shard one block ahead opens its block");
 
     RtpaCleanupQueue(&queue);
+    // Reordered packets get one block duration plus the reorder grace in ms.
+    // Feed production admission/dequeue with a controlled microsecond clock.
+    for (int duration = 5; duration <= 20; duration *= 2) {
+        AudioPacketDuration = duration;
+        clockUs = 1000000;
+        RtpaInitializeQueue(&queue);addData(100);
+        for (int seq = 104; seq <= 107; ++seq) addData((uint16_t)seq);
+        addData(107); // A late duplicate exits fast recovery mode.
+        check(queue.receivedOosData, "late data enables the reordering grace");
+        addData(108);
+        clockUs += (uint64_t)duration * 2000;
+        addData(110);addData(111); // 109 is still in flight.
+        clockUs = 1000000 + (uint64_t)duration * RTPA_DATA_SHARDS * 1000;
+        int status = addData(112);
+        check(status == 0 && !queue.blockHead->allowDiscontinuity && queue.stats.packetCountFecFailed == 0,
+              "a second block does not prematurely discard reordered audio");
+        if (status & RTPQ_RET_PACKET_READY) {
+            PRTP_PACKET packet;
+            while ((packet = RtpaGetQueuedPacket(&queue, 1, &length)) != NULL) free(packet);
+        }
+        clockUs += 5000;
+        check(addData(109) == RTPQ_RET_HANDLE_NOW, "late audio inside the full grace is still delivered");
+        int delivered = 0;
+        PRTP_PACKET packet;
+        while ((packet = RtpaGetQueuedPacket(&queue, 0, &length)) != NULL) {
+            if (length != 0) ++delivered;
+            free(packet);
+        }
+        check(delivered == 3 && queue.stats.packetCountFecFailed == 0,
+              "reordered audio drains in order without loss concealment");
+        RtpaCleanupQueue(&queue);
+
+        clockUs = 2000000;
+        RtpaInitializeQueue(&queue);addData(100);
+        for (int seq = 104; seq <= 107; ++seq) addData((uint16_t)seq);
+        addData(107);addData(108);addData(110);addData(111);
+        clockUs += ((uint64_t)duration * RTPA_DATA_SHARDS + RTPQ_OOS_WAIT_TIME_MS) * 1000 + 1;
+        check((addData(112) & RTPQ_RET_PACKET_READY) && queue.blockHead->allowDiscontinuity &&
+              queue.stats.packetCountFecFailed == 1, "a genuinely lost packet expires after the full grace");
+        RtpaCleanupQueue(&queue);
+    }
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;
 }
