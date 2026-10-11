@@ -39,6 +39,11 @@ bool PltEncryptMessage(PPLT_CRYPTO_CONTEXT ctx, int algorithm, int flags,
                        unsigned char* tag, int tagLength,
                        unsigned char* inputData, int inputDataLength,
                        unsigned char* outputData, int* outputDataLength) {
+    // A context that failed to allocate (PltCreateCryptoContext() returned NULL) is
+    // a failed operation, not a crash on the first packet.
+    if (ctx == NULL) {
+        return false;
+    }
 #ifdef USE_PSA_CRYPTO
     if (algorithm == ALGORITHM_AES_GCM) {
         LC_ASSERT(tag != NULL);
@@ -278,6 +283,11 @@ bool PltDecryptMessage(PPLT_CRYPTO_CONTEXT ctx, int algorithm, int flags,
                        unsigned char* tag, int tagLength,
                        unsigned char* inputData, int inputDataLength,
                        unsigned char* outputData, int* outputDataLength) {
+    // A context that failed to allocate (PltCreateCryptoContext() returned NULL) is
+    // a failed operation, not a crash on the first packet.
+    if (ctx == NULL) {
+        return false;
+    }
 #ifdef USE_PSA_CRYPTO
     if (algorithm == ALGORITHM_AES_GCM) {
         LC_ASSERT(tag != NULL);

@@ -100,6 +100,9 @@ int initializeInputStream(void) {
     LbqInitializeLinkedBlockingQueue(&packetHolderFreeList, MAX_QUEUED_INPUT_PACKETS);
 
     cryptoContext = PltCreateCryptoContext();
+    if (cryptoContext == NULL) {
+        return -1;
+    }
     encryptedControlStream = APP_VERSION_AT_LEAST(7, 1, 431);
 
     // FIXME: Unsure if this is exactly right, but it's probably good enough.

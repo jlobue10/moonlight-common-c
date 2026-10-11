@@ -348,10 +348,11 @@ int PltCreateEvent(PLT_EVENT* event) {
         return -1;
     }
 #else
-    if (PltCreateMutex(&event->mutex) < 0) {
+    // PltCreateMutex() returns the positive errno on failure; "< 0" never fired.
+    if (PltCreateMutex(&event->mutex) != 0) {
         return -1;
     }
-    if (PltCreateConditionVariable(&event->cond, &event->mutex) < 0) {
+    if (PltCreateConditionVariable(&event->cond, &event->mutex) != 0) {
         PltDeleteMutex(&event->mutex);
         return -1;
     }
@@ -411,7 +412,10 @@ int PltCreateConditionVariable(PLT_COND* cond, PLT_MUTEX* mutex) {
 #elif defined(__3DS__)
     CondVar_Init(cond);
 #else
-    pthread_cond_init(cond, NULL);
+    int err = pthread_cond_init(cond, NULL);
+    if (err != 0) {
+        return err;
+    }
 #endif
     activeCondVars++;
     return 0;

@@ -73,6 +73,9 @@ int initializeAudioStream(void) {
     pingThreadStarted = false;
     firstReceiveTime = 0;
     audioDecryptionCtx = PltCreateCryptoContext();
+    if (audioDecryptionCtx == NULL) {
+        return -1;
+    }
 #ifdef LC_DEBUG
     opusHeaderByte = INVALID_OPUS_HEADER;
 #endif
