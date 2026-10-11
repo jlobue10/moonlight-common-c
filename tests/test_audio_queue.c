@@ -199,8 +199,10 @@ int main(void) {
     check(totalDrained >= 63 * RTPA_DATA_SHARDS, "every retired block is drained (data or loss placeholders) as it is given up");
     RtpaCleanupQueue(&queue);
 
-    // A late block tail must also unblock buffered data beyond a wholly lost
-    // block. Exercise both ordinary sequence numbers and the 16-bit wrap.
+    // A late block tail must also unblock buffered data beyond a missing block. With the
+    // reorder grace active the missing block is waited for and, when it arrives, delivered
+    // in order (wrap == 0); once the grace has expired it is skipped and the buffered
+    // successor drains at once (wrap == 1, which also exercises the 16-bit wrap).
     for (int wrap = 0; wrap < 2; ++wrap) {
         uint16_t base = wrap ? 65528 : 108;
         wrapTimestamps = wrap != 0;
@@ -212,9 +214,10 @@ int main(void) {
         for (int i = 0; i < 3; ++i) addData((uint16_t)(base + i));
         check(addData((uint16_t)(base + 8)) == 0,
               "a later block waits for the current block's reordered tail");
+        if (wrap) clockUs += ((uint64_t)AudioPacketDuration * RTPA_DATA_SHARDS + RTPQ_OOS_WAIT_TIME_MS) * 1000 + 1;
         int status = addData((uint16_t)(base + 3));
         check(status == RTPQ_RET_PACKET_READY,
-              "late tail unblocks buffered audio across a wholly lost block");
+              "late tail unblocks buffered audio");
         drained = 0;
         // Match AudioStream's caller: HANDLE_NOW does not enter the queue drain.
         if (status & RTPQ_RET_PACKET_READY) {
@@ -224,12 +227,60 @@ int main(void) {
                 free(drainedPacket);
             }
         }
-        check(drained == 2 && seqs[0] == (uint16_t)(base + 3) && seqs[1] == (uint16_t)(base + 8),
-              "late tail and buffered successor reach the decoder without another arrival");
-        check(queue.nextRtpSequenceNumber == (uint16_t)(base + 9) && queue.stats.packetCountFecFailed == 0,
-              "resynchronization across the lost block preserves ordering without extra concealment");
+        if (wrap) {
+            check(drained == 2 && seqs[0] == (uint16_t)(base + 3) && seqs[1] == (uint16_t)(base + 8),
+                  "after the grace the lost block is skipped and the buffered successor drains without another arrival");
+            check(queue.nextRtpSequenceNumber == (uint16_t)(base + 9) && queue.stats.packetCountFecFailed == 0,
+                  "resynchronization across the lost block preserves ordering without extra concealment");
+        } else {
+            check(drained == 1 && seqs[0] == (uint16_t)(base + 3) && queue.nextRtpSequenceNumber == (uint16_t)(base + 4),
+                  "inside the grace the queue waits for the missing block instead of skipping it");
+            check(addData((uint16_t)(base + 4)) == RTPQ_RET_HANDLE_NOW && addData((uint16_t)(base + 5)) == RTPQ_RET_HANDLE_NOW &&
+                  addData((uint16_t)(base + 6)) == RTPQ_RET_HANDLE_NOW, "the late block is admitted and plays in order");
+            status = addData((uint16_t)(base + 7));
+            drained = 0;
+            if (status & RTPQ_RET_PACKET_READY) {
+                while ((drainedPacket = RtpaGetQueuedPacket(&queue, 0, &length)) != NULL) {
+                    if (drained < 4) seqs[drained] = drainedPacket->sequenceNumber;
+                    ++drained;
+                    free(drainedPacket);
+                }
+            }
+            check(status == RTPQ_RET_PACKET_READY && drained == 2 && seqs[0] == (uint16_t)(base + 7) && seqs[1] == (uint16_t)(base + 8) &&
+                  queue.nextRtpSequenceNumber == (uint16_t)(base + 9) && queue.stats.packetCountFecFailed == 0,
+                  "the late block's tail hands over the buffered successor with no concealment");
+        }
         RtpaCleanupQueue(&queue);
     }
+
+    // A whole block delayed behind the first packet of the block after it (a Wi-Fi retransmit
+    // burst overtaken by one packet). With the reorder grace active nothing may be skipped;
+    // before the gate the queue jumped to 116 at the drain and refused 112..115 (a 20 ms gap).
+    AudioPacketDuration = 5;
+    clockUs = 6000000;
+    RtpaInitializeQueue(&queue);
+    addData(100);
+    for (int seq = 104; seq <= 107; ++seq) addData((uint16_t)seq);
+    addData(107);  // late duplicate: OOS mode
+    addData(108); addData(109); addData(110);
+    clockUs += 5000;
+    check(addData(116) == 0, "a block two ahead waits for the current block's tail");
+    clockUs += 1000;
+    {
+        int n = 0; uint16_t got[8] = {0}; PRTP_PACKET p; int st;
+#define TAKE(seq_) do { if (st & RTPQ_RET_PACKET_READY) { \
+            while ((p = RtpaGetQueuedPacket(&queue, 0, &length)) != NULL) { if (n < 8) got[n] = p->sequenceNumber; ++n; free(p); } } \
+        else if (st == RTPQ_RET_HANDLE_NOW) { if (n < 8) got[n] = (uint16_t)(seq_); ++n; } } while (0)
+        st = addData(111); TAKE(111);
+        uint32_t oosBefore = queue.stats.packetCountOOS;
+        for (int seq = 112; seq <= 115; ++seq) { clockUs += 200; st = addData((uint16_t)seq); TAKE(seq); }
+        st = addData(117); TAKE(117);
+        check(queue.stats.packetCountOOS == oosBefore && n == 7 &&
+              got[0] == 111 && got[1] == 112 && got[4] == 115 && got[5] == 116 && got[6] == 117,
+              "a block delayed behind its successor's first packet is delivered inside the grace, not skipped");
+#undef TAKE
+    }
+    RtpaCleanupQueue(&queue);
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;

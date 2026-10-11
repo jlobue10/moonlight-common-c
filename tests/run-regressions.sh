@@ -12,6 +12,10 @@ for test in steam_haptic hdr_state control_truncation video_drain rtp_admission 
     # (test_rtp_staging.c builds blocks by hand and #undefs LC_DEBUG itself before
     # including the queue, so it is deliberately not on this list.)
     if [ "$test" = video_drain ] || [ "$test" = rtp_admission ] || [ "$test" = mouse_batching ] || [ "$test" = controller_batching ] || [ "$test" = pen_batching ] || [ "$test" = motion_admission ] || [ "$test" = video_start_unwind ] || [ "$test" = sdp_bitrate ] || [ "$test" = depacketizer_flags ] || [ "$test" = rtsp_opus_params ]; then extra_flags=-DLC_DEBUG; fi
+    # The audio queue's block invariants (validateFecBlockState, the placeholder accounting) only
+    # exist in debug builds; LC_FUZZING keeps LC_ASSERT but leaves FEC_VALIDATION_MODE off so the
+    # 4-shard completion checks still work.
+    if [ "$test" = audio_queue ]; then extra_flags="-DLC_DEBUG -DLC_FUZZING"; fi
     "$cc" ${CFLAGS:-} $extra_flags -ffunction-sections -fdata-sections -DHAS_SOCKLEN_T \
         -I"$repo/src" -I"$repo/enet/include" -I"$repo/nanors" -I"$repo/nanors/deps" -I"$repo/nanors/deps/obl" \
         "$repo/tests/test_$test.c" \

@@ -544,14 +544,30 @@ static bool queueHasPacketReady(PRTP_AUDIO_QUEUE queue) {
 // remaining packets from this block arrive, they will trigger the OOS detection and kick us out of fast
 // audio recovery mode.
 //
-// Returns true when the queue was moved to the oldest block.
+// How long a reordered packet (or block) may lag before it is given up on, measured from the
+// arrival of the data waiting behind it.
+static uint64_t reorderWaitUs(void) {
+    return ((uint64_t)AudioPacketDuration * RTPA_DATA_SHARDS + RTPQ_OOS_WAIT_TIME_MS) * 1000;
+}
+
+// Returns true when nextRtpSequenceNumber precedes the head block (a whole block is missing),
+// whether or not the queue moved. In fast recovery mode the queue jumps to the head at once.
+// Once out-of-order data has been seen, the missing block gets the same grace as a missing
+// packet inside a block: wait reorderWaitUs() from the head's arrival with
+// oldestRtpBaseSequenceNumber left behind, so a late block is still admitted and becomes
+// the head itself instead of being skipped (a retransmit burst overtaken by one packet of
+// the block after it must not cost a 20 ms gap).
 static bool resyncToOldestBlock(PRTP_AUDIO_QUEUE queue) {
-    if (queue->blockHead != NULL && isBefore16(queue->nextRtpSequenceNumber, queue->blockHead->fecHeader.baseSequenceNumber)) {
-        queue->nextRtpSequenceNumber = queue->blockHead->fecHeader.baseSequenceNumber;
-        queue->oldestRtpBaseSequenceNumber = queue->blockHead->fecHeader.baseSequenceNumber;
-        return true;
+    PRTPA_FEC_BLOCK head = queue->blockHead;
+    if (head == NULL || !isBefore16(queue->nextRtpSequenceNumber, head->fecHeader.baseSequenceNumber)) {
+        return false;
     }
-    return false;
+    if (queue->receivedOosData && PltGetMicroseconds() - head->queueTimeUs <= reorderWaitUs()) {
+        return true;  // inside the grace: nothing is ready yet, keep waiting for the late block
+    }
+    queue->nextRtpSequenceNumber = head->fecHeader.baseSequenceNumber;
+    queue->oldestRtpBaseSequenceNumber = head->fecHeader.baseSequenceNumber;
+    return true;
 }
 
 static void handleMissingPackets(PRTP_AUDIO_QUEUE queue) {
@@ -575,8 +591,7 @@ static void handleMissingPackets(PRTP_AUDIO_QUEUE queue) {
     // At this point, we know we've got a second FEC block queued up waiting on the first one to complete.
     // If we've never seen OOS data from this host, we'll assume the first one is lost and skip forward.
     // If we have seen OOS data, we'll wait for a little while longer to see if OOS packets arrive before giving up.
-    const uint64_t reorderWaitUs = ((uint64_t)AudioPacketDuration * RTPA_DATA_SHARDS + RTPQ_OOS_WAIT_TIME_MS) * 1000;
-    if (!queue->receivedOosData || PltGetMicroseconds() - queue->blockHead->queueTimeUs > reorderWaitUs) {
+    if (!queue->receivedOosData || PltGetMicroseconds() - queue->blockHead->queueTimeUs > reorderWaitUs()) {
         LC_ASSERT(!isBefore16(queue->nextRtpSequenceNumber, queue->blockHead->fecHeader.baseSequenceNumber));
 
         queue->stats.packetCountFecFailed++;
