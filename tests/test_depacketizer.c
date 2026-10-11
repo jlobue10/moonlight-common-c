@@ -104,6 +104,7 @@ int main(void) {
     check(popFrame(&buffers, &zero, &total) == 1 && idrRequests == 0 && consecutiveFrameDrops == 0,
           "the frame after a loss decodes and clears the drop count");
 
+    stopVideoDepacketizer();
     destroyVideoDepacketizer();
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;
