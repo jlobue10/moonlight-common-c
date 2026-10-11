@@ -1541,14 +1541,14 @@ int LiSendControllerMotionEvent(uint8_t controllerNumber, uint8_t motionType, fl
 
     // Queue a packet holder if this is the only pending sensor event
     if (!currentGamepadSensorState[controllerNumber][motionType - 1].dirty) {
-        // Set the dirty flag to claim ownership of inserting the packet holder
-        // and unlock to allow other threads to enqueue or process input.
-        currentGamepadSensorState[controllerNumber][motionType - 1].dirty = true;
-        PltUnlockMutex(&batchedInputMutex);
-
+        // Publish a pending update only after its holder is actually admitted.
+        // Otherwise another producer can report success by coalescing into a
+        // holder whose allocation/enqueue later fails, losing even a final gyro
+        // stop. Keep admission and the dirty flag under the same mutex as the
+        // sender and other producers (including both failure paths).
         holder = allocatePacketHolder(0);
         if (holder == NULL) {
-            currentGamepadSensorState[controllerNumber][motionType - 1].dirty = false;
+            PltUnlockMutex(&batchedInputMutex);
             return -1;
         }
 
@@ -1565,19 +1565,19 @@ int LiSendControllerMotionEvent(uint8_t controllerNumber, uint8_t motionType, fl
 
         err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
         if (err != LBQ_SUCCESS) {
+            PltUnlockMutex(&batchedInputMutex);
             LC_ASSERT(err == LBQ_BOUND_EXCEEDED || err == LBQ_INTERRUPTED);  // interrupted while stopping
             Limelog("Input queue reached maximum size limit\n");
             freePacketHolder(holder);
-
-            // We weren't able to insert the entry, so let the next call try again
-            currentGamepadSensorState[controllerNumber][motionType - 1].dirty = false;
+            return err;
         }
+        currentGamepadSensorState[controllerNumber][motionType - 1].dirty = true;
     }
     else {
         // There's already a packet holder queued to send this event
-        PltUnlockMutex(&batchedInputMutex);
         err = 0;
     }
+    PltUnlockMutex(&batchedInputMutex);
 
     return err;
 }
