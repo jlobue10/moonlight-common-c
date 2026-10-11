@@ -25,7 +25,8 @@ static void check(int ok, const char* text) { ++checks; printf("%s %s\n", ok ? "
 static void deliver(uint32_t frame, uint32_t spi, int sof, int eof, const unsigned char* payload, int payloadLen) {
     const int headerLen = sizeof(RTP_PACKET) + 4 + sizeof(NV_VIDEO_PACKET);
     const int length = headerLen + payloadLen;
-    char* buffer = calloc(1, length + sizeof(RTPV_QUEUE_ENTRY));
+    const int entryOffset = (length + 7) & ~7;  // keep the queue entry aligned behind an odd-sized payload
+    char* buffer = calloc(1, entryOffset + sizeof(RTPV_QUEUE_ENTRY));
     PRTP_PACKET rtp = (PRTP_PACKET)buffer;
     rtp->header = FLAG_EXTENSION;
     rtp->sequenceNumber = (uint16_t)spi;
@@ -34,7 +35,7 @@ static void deliver(uint32_t frame, uint32_t spi, int sof, int eof, const unsign
     nv->frameIndex = LE32(frame);
     nv->flags = (sof ? FLAG_SOF : 0) | (eof ? FLAG_EOF : 0) | FLAG_CONTAINS_PIC_DATA;
     if (payloadLen) memcpy(buffer + headerLen, payload, payloadLen);
-    PRTPV_QUEUE_ENTRY entry = (PRTPV_QUEUE_ENTRY)(buffer + length);
+    PRTPV_QUEUE_ENTRY entry = (PRTPV_QUEUE_ENTRY)(buffer + entryOffset);
     entry->packet = rtp;
     entry->length = length;
     entry->receiveTimeUs = 1000000 + spi;
