@@ -1,3 +1,8 @@
+// Platform.c defines _GNU_SOURCE itself (pthread_setname_np); it has to be set before the
+// first system header, which this test includes earlier.
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 // Platform primitives: a failed mutex/condvar init must be reported by PltCreateEvent (the
 // "< 0" test on a positive errno never fired), and a NULL crypto context must fail the
 // operation instead of being dereferenced.

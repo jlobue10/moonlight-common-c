@@ -89,12 +89,20 @@ int main(void) {
     check(popFrame(&buffers, &zero, &total) == 1 && buffers == 2 && zero == 0 && total == 36 && completeFrames == 2,
           "an empty middle packet queues no zero-length buffer");
 
-    // A last packet whose declared payload length covers only the frame header
-    sendFrame(3, 5, 0, 0);
-    int rc = popFrame(&buffers, &zero, &total);
-    check(rc != 1 || zero == 0, "a header-only last payload length never yields a zero-length buffer");
+    // A short first packet of frame 3 (header only, 8 bytes) carries a last-payload
+    // length of 0; the frame is dropped, and frame 2's value must not survive into it.
+    {
+        unsigned char headerOnly[8] = {0x01, 0, 0, 2, 0, 0, 0, 0};
+        deliver(3, 5, 1, 0, headerOnly, sizeof(headerOnly));
+        check(lastPacketPayloadLength == 0, "a new frame's first packet resets the last-payload length");
+        unsigned char tail[20] = {0};
+        deliver(3, 6, 0, 1, tail, sizeof(tail));
+        int rc = popFrame(&buffers, &zero, &total);
+        check(rc != 1 || zero == 0, "a header-only last payload length never yields a zero-length buffer");
+    }
 
     // Lose frame 4; frame 5 then arrives. Intra-only: no IDR request, counted once, no RFI.
+    nextFrameNumber = 4;  // frame 3 is not sent in this run
     idrRequests = lossReports = 0;
     const int dropsBefore = consecutiveFrameDrops;
     notifyFrameLost(4, false);

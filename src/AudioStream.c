@@ -74,6 +74,9 @@ int initializeAudioStream(void) {
     firstReceiveTime = 0;
     audioDecryptionCtx = PltCreateCryptoContext();
     if (audioDecryptionCtx == NULL) {
+        // The stage is not advanced on failure, so destroyAudioStream() never runs.
+        LbqDestroyLinkedBlockingQueue(&packetQueue);
+        RtpaCleanupQueue(&rtpAudioQueue);
         return -1;
     }
 #ifdef LC_DEBUG
