@@ -1202,6 +1202,17 @@ void notifyFrameLost(unsigned int frameNumber, bool speculative) {
     // We may not invalidate frames that we've already received
     LC_ASSERT(frameNumber >= startFrameNumber);
 
+    // The previous frame may still be open: the queue takes a frame's data count
+    // from the host's FEC header and only validates EOF placement on recovered
+    // packets, so a frame whose last packet never carried FLAG_EOF leaves
+    // decodingFrame set. A loss notification is a frame boundary; close that
+    // frame like the corrupt-frame branch does instead of asserting on it (or,
+    // in release, dropping the next good frame's SOF as a corrupt frame).
+    if (decodingFrame) {
+        Limelog("Discarding unterminated frame %d on loss of frame %d\n", nextFrameNumber - 1, frameNumber);
+        decodingFrame = false;
+    }
+
     // Drop state and determine if we need an IDR frame or if RFI is okay
     dropFrameState();
 
