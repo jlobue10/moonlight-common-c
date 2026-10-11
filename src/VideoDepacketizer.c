@@ -832,6 +832,11 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
     // Check sequencing of this frame to ensure we didn't
     // miss one in between
     if (firstPacket) {
+        // A frame's last-packet payload length comes from its own first packet;
+        // reset it here (before any length check) so a short or header-only first
+        // packet cannot inherit the previous frame's value.
+        lastPacketPayloadLength = 0;
+
         // Make sure this is the next consecutive frame
         if (isBefore32(nextFrameNumber, frameIndex)) {
             if (nextFrameNumber + 1 == frameIndex) {
@@ -879,7 +884,9 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
 
     // If this is the first packet, skip the frame header (if one exists)
     uint32_t frameHeaderSize;
-    LC_ASSERT_VT(currentPos.length > 0);
+    // A first packet must carry the frame header; a later packet may be empty
+    // (nothing is queued for it, see the guards around queueFragment()).
+    LC_ASSERT_VT(currentPos.length > 0 || !firstPacket);
     if (firstPacket && currentPos.length > 0) {
         // Parse the frame type from the header
         LC_ASSERT_VT(currentPos.length >= 4);
@@ -932,9 +939,7 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
         }
 
         // Codecs like H.264 and HEVC handle the FEC trailing zero padding just fine, but other
-        // codecs need the exact length encoded separately. Reset it per frame so a short
-        // first packet cannot inherit the previous frame's value.
-        lastPacketPayloadLength = 0;
+        // codecs need the exact length encoded separately.
         LC_ASSERT_VT(currentPos.length >= 6);
         if (!(NegotiatedVideoFormat & (VIDEO_FORMAT_MASK_H264 | VIDEO_FORMAT_MASK_H265)) && currentPos.length >= 6) {
             BYTE_BUFFER bb;

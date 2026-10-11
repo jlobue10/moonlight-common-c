@@ -117,6 +117,22 @@ int main(void) {
     check(sends == 3 && LE16(sent[1].buttonFlags) == A_FLAG && sent[1].buttonFlags2 == 0,
           "GFE: button transitions are retained with buttonFlags2 zero");
 
+    // A session ends with a controller holder still queued; the next session's
+    // first controller event must start a fresh holder, not write into the freed
+    // one (the reset used to sit behind an early return in initializeInputStream).
+    sendState(0, 0, 0, 0);
+    check(currentQueuedControllerPacket[0] != NULL, "a holder is queued at session end");
+    initialized = false;
+    LbqSignalQueueShutdown(&packetHolderFreeList);
+    LbqSignalQueueShutdown(&packetQueue);
+    destroyInputStream();
+    check(initializeInputStream() == 0 && currentQueuedControllerPacket[0] == NULL && currentQueuedMousePacket == NULL,
+          "a new session starts with no queued controller or mouse holder");
+    initialized = true;
+    sendState(5, 0, 0, 0);
+    drain();
+    check(sends == 1 && sent[0].leftTrigger == 5, "the new session's first controller event goes out on its own holder");
+
     initialized = false;
     LbqSignalQueueShutdown(&packetHolderFreeList);
     LbqSignalQueueShutdown(&packetQueue);

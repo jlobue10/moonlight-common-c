@@ -444,6 +444,12 @@ int initializeControlStream(void) {
     // Ordinary haptic events have a separate 32-entry limit.
     LbqInitializeLinkedBlockingQueue(&asyncCallbackQueue, 256);
     if (PltCreateMutex(&enetMutex) != 0) {
+        // The stage is not advanced on failure, so destroyControlStream() never
+        // runs: release what was created above.
+        LbqDestroyLinkedBlockingQueue(&asyncCallbackQueue);
+        LbqDestroyLinkedBlockingQueue(&frameFecStatusQueue);
+        LbqDestroyLinkedBlockingQueue(&referenceFrameControlQueue);
+        PltCloseEvent(&idrFrameRequiredEvent);
         return -1;
     }
 
@@ -496,6 +502,14 @@ int initializeControlStream(void) {
     encryptionCtx = PltCreateCryptoContext();
     decryptionCtx = PltCreateCryptoContext();
     if (encryptionCtx == NULL || decryptionCtx == NULL) {
+        PltDestroyCryptoContext(encryptionCtx);
+        PltDestroyCryptoContext(decryptionCtx);
+        encryptionCtx = decryptionCtx = NULL;
+        PltDeleteMutex(&enetMutex);
+        LbqDestroyLinkedBlockingQueue(&asyncCallbackQueue);
+        LbqDestroyLinkedBlockingQueue(&frameFecStatusQueue);
+        LbqDestroyLinkedBlockingQueue(&referenceFrameControlQueue);
+        PltCloseEvent(&idrFrameRequiredEvent);
         return -1;
     }
     const SS_HDR_METADATA emptyHdrMetadata = {0};

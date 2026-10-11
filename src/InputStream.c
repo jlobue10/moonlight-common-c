@@ -99,8 +99,24 @@ int initializeInputStream(void) {
     LbqInitializeLinkedBlockingQueue(&packetQueue, MAX_QUEUED_INPUT_PACKETS);
     LbqInitializeLinkedBlockingQueue(&packetHolderFreeList, MAX_QUEUED_INPUT_PACKETS);
 
+    // Reset the batching state before anything here can fail: destroyInputStream()
+    // freed the holders the previous session left queued, and a stale pointer
+    // here sent the next session's first controller packet into freed memory.
+    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
+    memset(currentGamepadSensorState, 0, sizeof(currentGamepadSensorState));
+    currentQueuedMousePacket = NULL;
+    stopping = false;
+    if (PltCreateMutex(&batchedInputMutex) != 0) {
+        LbqDestroyLinkedBlockingQueue(&packetQueue);
+        LbqDestroyLinkedBlockingQueue(&packetHolderFreeList);
+        return -1;
+    }
+
     cryptoContext = PltCreateCryptoContext();
     if (cryptoContext == NULL) {
+        PltDeleteMutex(&batchedInputMutex);
+        LbqDestroyLinkedBlockingQueue(&packetQueue);
+        LbqDestroyLinkedBlockingQueue(&packetHolderFreeList);
         return -1;
     }
     encryptedControlStream = APP_VERSION_AT_LEAST(7, 1, 431);
@@ -118,15 +134,6 @@ int initializeInputStream(void) {
 
     // Start with the virtual mouse centered
     absCurrentPosX = absCurrentPosY = 0.5f;
-
-    // destroyInputStream() frees the holders still queued at the end of a session;
-    // a pointer left here would send the next session's first controller packet
-    // into freed memory.
-    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
-    memset(currentGamepadSensorState, 0, sizeof(currentGamepadSensorState));
-    currentQueuedMousePacket = NULL;
-    PltCreateMutex(&batchedInputMutex);
-    stopping = false;
 
     return 0;
 }
