@@ -815,8 +815,13 @@ static void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length,
     // The FEC queue can sometimes recover corrupt frames (see comments in RtpFecQueue).
     // It almost always detects them before they get to us, but in case it doesn't
     // the streamPacketIndex not matching correctly should find nearly all of the rest.
+    // The SOF/EOF flags are host data too: a first packet without SOF (the very first
+    // packet of the stream is "continuous" against the initial index) or a SOF repeated
+    // mid-frame breaks the frame-boundary invariant below; treat it like any other
+    // corrupt frame rather than asserting on it.
     if (isBefore24(streamPacketIndex, U24(lastPacketInStream + 1)) ||
-            (!(flags & FLAG_SOF) && streamPacketIndex != U24(lastPacketInStream + 1))) {
+            (!(flags & FLAG_SOF) && streamPacketIndex != U24(lastPacketInStream + 1)) ||
+            firstPacket == decodingFrame) {
         Limelog("Depacketizer detected corrupt frame: %d", frameIndex);
         decodingFrame = false;
         nextFrameNumber = frameIndex + 1;
