@@ -195,6 +195,18 @@ static void ClInternalConnectionTerminated(int errorCode)
     PltDetachThread(&terminationCallbackThread);
 }
 
+// Whether a started stage has already reported termination (the app has had its
+// connectionTerminated callback). Read by the connection thread between the start
+// stages so a session the host ended during startup is not reported as started.
+static bool connectionAlreadyTerminated(void)
+{
+#if defined(LC_WINDOWS)
+    return InterlockedCompareExchange(&alreadyTerminated, 0, 0) != 0;
+#else
+    return __atomic_load_n(&alreadyTerminated, __ATOMIC_ACQUIRE) != 0;
+#endif
+}
+
 static bool parseRtspPortNumberFromUrl(const char* rtspSessionUrl, uint16_t* port)
 {
     // If the session URL is not present, we will just use the well known port
@@ -310,7 +322,9 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     // the given packet size to the nearest multiple of 16.
     StreamConfig.packetSize -= StreamConfig.packetSize % 16;
 
-    if (StreamConfig.packetSize == 0) {
+    // A negative multiple of 16 survived the rounding and reached the SDP and the
+    // receive buffer sizing as is.
+    if (StreamConfig.packetSize <= 0) {
         Limelog("Invalid packet size specified\n");
         err = -1;
         goto Cleanup;
@@ -517,6 +531,13 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     LC_ASSERT(stage == STAGE_CONTROL_STREAM_START);
     ListenerCallbacks.stageComplete(STAGE_CONTROL_STREAM_START);
     Limelog("done\n");
+    if (connectionAlreadyTerminated()) {
+        // A started stage already reported termination; the app has had its callback,
+        // so no stageFailed is raised. Unwind with the stored code.
+        Limelog("Connection terminated by the host during startup\n");
+        err = terminationCallbackErrorCode != 0 ? terminationCallbackErrorCode : -1;
+        goto Cleanup;
+    }
 
     Limelog("Starting video stream...");
     ListenerCallbacks.stageStarting(STAGE_VIDEO_STREAM_START);
@@ -530,6 +551,13 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     LC_ASSERT(stage == STAGE_VIDEO_STREAM_START);
     ListenerCallbacks.stageComplete(STAGE_VIDEO_STREAM_START);
     Limelog("done\n");
+    if (connectionAlreadyTerminated()) {
+        // A started stage already reported termination; the app has had its callback,
+        // so no stageFailed is raised. Unwind with the stored code.
+        Limelog("Connection terminated by the host during startup\n");
+        err = terminationCallbackErrorCode != 0 ? terminationCallbackErrorCode : -1;
+        goto Cleanup;
+    }
 
     Limelog("Starting audio stream...");
     ListenerCallbacks.stageStarting(STAGE_AUDIO_STREAM_START);
@@ -543,6 +571,13 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     LC_ASSERT(stage == STAGE_AUDIO_STREAM_START);
     ListenerCallbacks.stageComplete(STAGE_AUDIO_STREAM_START);
     Limelog("done\n");
+    if (connectionAlreadyTerminated()) {
+        // A started stage already reported termination; the app has had its callback,
+        // so no stageFailed is raised. Unwind with the stored code.
+        Limelog("Connection terminated by the host during startup\n");
+        err = terminationCallbackErrorCode != 0 ? terminationCallbackErrorCode : -1;
+        goto Cleanup;
+    }
 
     Limelog("Starting input stream...");
     ListenerCallbacks.stageStarting(STAGE_INPUT_STREAM_START);
@@ -562,6 +597,13 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     PltSleepMs(10);
     LiSendMouseMoveEvent(-1, -1);
     PltSleepMs(10);
+
+    if (connectionAlreadyTerminated()) {
+        // connectionStarted() must not follow connectionTerminated().
+        Limelog("Connection terminated by the host during startup\n");
+        err = terminationCallbackErrorCode != 0 ? terminationCallbackErrorCode : -1;
+        goto Cleanup;
+    }
 
     ListenerCallbacks.connectionStarted();
 
