@@ -186,6 +186,19 @@ int main(void) {
     check(LiSendMouseMoveAsMousePositionEvent(1, 1, 1, 1080) == -3 &&
           LiSendMouseMoveAsMousePositionEvent(1, 1, 1920, 0) == -3 &&
           LbqGetItemCount(&packetQueue) == 0, "degenerate relative reference planes queue no input");
+    check(LiSendMousePositionEvent(1, 1, 1, 1) == -3 &&
+          LiSendMousePositionEvent(0, 0, 0, 0) == -3 &&
+          LiSendMousePositionEvent(5, 5, 1920, -1) == -3 &&
+          LiSendMousePositionEvent(5, 5, -1920, 1080) == -3 &&
+          LbqGetItemCount(&packetQueue) == 0, "degenerate absolute reference planes queue no input");
+    check(LiSendMousePositionEvent(1, 1, 2, 2) == 0, "the smallest valid plane is accepted");
+    drain();
+    check(sends == 1 && sent[0].x == 1 && sent[0].y == 1, "the far corner of a 2x2 plane is sent as-is");
+    // The rejections above must not have moved the virtual cursor off the plane.
+    LiSendMouseMoveAsMousePositionEvent(0, 0, 1920, 1080);
+    drain();
+    check(sends == 1 && sent[0].x >= 0 && sent[0].x <= 1919 && sent[0].y >= 0 && sent[0].y <= 1079,
+          "the virtual cursor stays finite and on the plane after rejected calls");
 
     initialized = false;
     LbqSignalQueueShutdown(&packetHolderFreeList);

@@ -23,7 +23,7 @@ jobs:
     permissions:
       contents: read
     env:
-      CFLAGS: -g -fsanitize=address,undefined -fno-omit-frame-pointer
+      CFLAGS: -g -fsanitize=address,undefined,float-cast-overflow -fno-omit-frame-pointer
     steps:
       - uses: actions/checkout@v4
         with:
