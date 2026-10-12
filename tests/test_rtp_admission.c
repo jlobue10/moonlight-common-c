@@ -25,8 +25,10 @@ static int delivered, lostFrames, lastDeliveredSeq, deliveredInOrder = 1, verify
 static void fillPayload(unsigned char* data, uint16_t seq) {
     for (int i = 0; i < PAYLOAD; i++) data[i] = (unsigned char)(seq * 31 + i * 7);
 }
-// The transport clock is initialized by connection startup in production.
-uint64_t testGetMicroseconds(void) { static uint64_t now = 1000000; return ++now; }
+// The transport clock is initialized by connection startup in production; cases may
+// advance it to model a stall.
+static uint64_t clockUs = 1000000;
+uint64_t testGetMicroseconds(void) { return ++clockUs; }
 void testQueueRtpPacket(PRTPV_QUEUE_ENTRY entry) {
     if (delivered && U16(entry->packet->sequenceNumber) != U16(lastDeliveredSeq + 1)) deliveredInOrder = 0;
     lastDeliveredSeq = entry->packet->sequenceNumber;
@@ -173,6 +175,7 @@ static int addFecPacket(uint32_t frame, uint16_t seq, uint32_t fecIndex, uint32_
 int main(void) {
     memcpy(AppVersionQuad, (int[]){7, 1, 431, 0}, sizeof(AppVersionQuad));  // multi-FEC capable host
     StreamConfig.packetSize = PAYLOAD + sizeof(NV_VIDEO_PACKET);  // counted from the end of the RTP header, as the host sets it
+    StreamConfig.fps = 60;
     RtpvInitializeQueue(&queue);
 
     // Frame 1: four shards, the third arrives twice and after the fourth.
@@ -308,6 +311,27 @@ int main(void) {
         check(delivered == 8 && deliveredInOrder && payloadMismatches == 0, "FEC recovery: two lost shards are rebuilt from four parity shards");
         verifyPayload = 0;
     }
+
+    // C27-01: one forged far-ahead frame index must not move the queue. The bound is what
+    // the host could have produced since the current block started plus two seconds.
+    RtpvCleanupQueue(&queue);
+    RtpvInitializeQueue(&queue);
+    delivered = lostFrames = 0;
+    check(addPacket(1, 5000, 0, 2, 1, 0) == RTPF_RET_QUEUED && addPacket(1, 5001, 1, 2, 0, 1) == RTPF_RET_QUEUED && delivered == 2,
+          "far-ahead: frame 1 delivered");
+    check(addPacket(2 + 30000, 5002, 0, 1, 1, 1) == RTPF_RET_REJECTED && queue.currentFrameNumber == 2 && lostFrames == 0 && delivered == 2,
+          "far-ahead: a frame 30000 ahead of the current one is rejected without touching the queue");
+    check(addPacket(2u - 40000u, 5002, 0, 1, 1, 1) == RTPF_RET_REJECTED && queue.currentFrameNumber == 2,
+          "far-ahead: a frame 40000 behind in 32 bits (25536 ahead mod 2^16) is rejected too");
+    check(addPacket(2, 5002, 0, 2, 1, 0) == RTPF_RET_QUEUED && addPacket(2, 5003, 1, 2, 0, 1) == RTPF_RET_QUEUED && delivered == 4,
+          "far-ahead: the genuine next frame is still delivered");
+    check(addPacket(3 + 100, 5004, 0, 2, 1, 0) == RTPF_RET_QUEUED && lostFrames == 1 && queue.currentFrameNumber == 103,
+          "far-ahead: a jump inside the two-second slack is a normal loss");
+    clockUs += 10 * 1000000;  // a ten-second stall
+    check(addPacket(103 + 1000, 6000, 0, 2, 1, 0) == RTPF_RET_QUEUED && lostFrames == 2 && queue.currentFrameNumber == 1103,
+          "far-ahead: after a stall the bound has grown with the clock (1000 < 2 * 60 * 10 + 120)");
+    check(addPacket(1103 + 1400, 7000, 0, 2, 1, 0) == RTPF_RET_REJECTED && queue.currentFrameNumber == 1103,
+          "far-ahead: a jump beyond what the stall allows is still rejected");
 
     RtpvCleanupQueue(&queue);
     printf("%d checks, %d failures\n", checks, failures);

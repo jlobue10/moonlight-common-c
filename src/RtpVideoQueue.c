@@ -17,6 +17,27 @@
 // RTP packets use a 90 KHz presentation timestamp clock
 #define PTS_DIVISOR 90
 
+// Frame indexes on an unencrypted stream are not authenticated. A packet may run ahead of
+// the current frame by at most the frames the host could have produced since the current
+// block started (twice the negotiated rate, so a host catching up after a stall is never
+// refused) plus two seconds of slack for bursts and the host's bootstrap placeholders. A
+// real stall advances the bound with the clock; one forged datagram cannot park
+// currentFrameNumber tens of thousands of frames ahead and blank the stream until the
+// host's counter catches up (C27-01).
+#define FRAME_ADVANCE_SLACK_SECONDS 2
+static bool isFrameAdvancePlausible(PRTP_VIDEO_QUEUE queue, uint32_t frameIndex) {
+    uint64_t fps, elapsedUs, maxAhead;
+
+    if (queue->bufferFirstRecvTimeUs == 0) {
+        // Nothing admitted yet: the host's first frame index is whatever it is
+        return true;
+    }
+    fps = StreamConfig.fps > 0 ? (uint64_t)StreamConfig.fps : 60;
+    elapsedUs = PltGetMicroseconds() - queue->bufferFirstRecvTimeUs;
+    maxAhead = (elapsedUs * fps * 2) / 1000000 + fps * FRAME_ADVANCE_SLACK_SECONDS;
+    return U16(frameIndex - queue->currentFrameNumber) <= maxAhead;
+}
+
 void RtpvInitializeQueue(PRTP_VIDEO_QUEUE queue) {
     reed_solomon_init();
     memset(queue, 0, sizeof(*queue));
@@ -567,6 +588,11 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
 #ifndef LC_FUZZING
     if (isBefore16(nvPacket->frameIndex, queue->currentFrameNumber)) {
         // Reject frames behind our current frame number
+        return RTPF_RET_REJECTED;
+    }
+    if (!isFrameAdvancePlausible(queue, nvPacket->frameIndex)) {
+        // Reject frames implausibly far ahead of it (nothing below has run yet)
+        queue->stats.packetCountInvalid++;
         return RTPF_RET_REJECTED;
     }
 #endif

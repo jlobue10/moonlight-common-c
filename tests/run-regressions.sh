@@ -6,7 +6,7 @@ build=${1:?Usage: tests/run-regressions.sh path/to/cmake-build}
 build=$(CDPATH= cd -- "$build" && pwd)
 cc=${CC:-cc}
 # Match sanitizer flags used to build the library via CFLAGS, when applicable.
-for test in steam_haptic hdr_state control_truncation video_drain rtp_admission rtp_staging socket_subnet input_motion motion_admission audio_queue rtsp_parser input_utf8 controller_batching pen_batching mouse_batching video_start video_start_unwind depacketizer depacketizer_flags platform_init sdp_bitrate rtsp_opus_params stun_padding; do
+for test in steam_haptic hdr_state control_truncation video_drain rtp_admission rtp_staging socket_subnet input_motion motion_admission audio_queue rtsp_parser input_utf8 controller_batching pen_batching mouse_batching video_start video_start_unwind depacketizer depacketizer_flags platform_init sdp_bitrate rtsp_opus_params stun_padding audio_start; do
     extra_flags=
     # Exercise ownership and oversized-FEC admission assertions in debug builds.
     # (test_rtp_staging.c builds blocks by hand and #undefs LC_DEBUG itself before
@@ -55,6 +55,7 @@ done
 "$build/test-depacketizer_flags"
 "$build/test-rtsp_opus_params"
 "$build/test-stun_padding"
+"$build/test-audio_start"
 "$build/test-depacketizer"
 "$build/test-platform_init"
 "$build/test-video-format"
