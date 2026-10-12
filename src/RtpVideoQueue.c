@@ -18,25 +18,55 @@
 #define PTS_DIVISOR 90
 
 // Frame indexes on an unencrypted stream are not authenticated. A packet may run ahead of
-// the current frame by at most the frames the host could have produced since the current
-// block started (twice the negotiated rate, so a host catching up after a stall is never
-// refused) plus two seconds of slack for bursts and the host's bootstrap placeholders. A
-// real stall advances the bound with the clock; one forged datagram cannot park
-// currentFrameNumber tens of thousands of frames ahead and blank the stream until the
-// host's counter catches up (C27-01).
+// the current frame by at most the frames the host could have produced since the bound's
+// origin (twice the negotiated rate, so a host catching up after a stall is never refused)
+// plus two seconds of slack for bursts and the host's bootstrap placeholders. A real stall
+// advances the bound with the clock; one forged datagram cannot park currentFrameNumber
+// tens of thousands of frames ahead and blank the stream until the host's counter catches
+// up (C27-01). The origin is NOT the current block's receive stamp: a kernel backlog
+// drained in milliseconds after a stall of this thread re-stamps that on every buffered
+// block, which left the live frames behind the backlog rejected (C28-01); see
+// updateFrameAdvanceOrigin().
 #define FRAME_ADVANCE_SLACK_SECONDS 2
+static uint64_t negotiatedFps(void) {
+    return StreamConfig.fps > 0 ? (uint64_t)StreamConfig.fps : 60;
+}
 static bool isFrameAdvancePlausible(PRTP_VIDEO_QUEUE queue, uint32_t frameIndex) {
     uint64_t fps, elapsedUs, maxAhead;
 
-    if (queue->bufferFirstRecvTimeUs == 0) {
+    if (queue->advanceBaseTimeUs == 0) {
         // Nothing admitted yet: the host's first frame index is whatever it is
         return true;
     }
-    fps = StreamConfig.fps > 0 ? (uint64_t)StreamConfig.fps : 60;
-    elapsedUs = PltGetMicroseconds() - queue->bufferFirstRecvTimeUs;
+    fps = negotiatedFps();
+    elapsedUs = PltGetMicroseconds() - queue->advanceBaseTimeUs;
     maxAhead = (elapsedUs * fps * 2) / 1000000 + fps * FRAME_ADVANCE_SLACK_SECONDS;
     // Frame indexes use the full 32-bit wire value, unlike RTP sequence numbers.
     return U32(frameIndex - queue->currentFrameNumber) <= maxAhead;
+}
+
+// Called when a block is (re)initialised for frameIndex, before currentFrameNumber moves.
+// The origin moves to now on the first block, or when the admitted jump is larger than a
+// second of frames (the stall credit is spent, so a forged packet admitted inside a
+// legitimate window cannot reuse it); after a gap it stays at the block before the gap
+// (the host may have produced frames we have not seen since then); on paced delivery it
+// follows the clock; during a burst of contiguous blocks (a drained backlog) it stays put,
+// so the live frames behind the backlog are admitted against the pre-stall origin.
+static void updateFrameAdvanceOrigin(PRTP_VIDEO_QUEUE queue, uint32_t frameIndex, uint64_t nowUs) {
+    uint64_t fps = negotiatedFps();
+    uint64_t gapUs = nowUs - queue->lastBlockRecvTimeUs;
+    uint32_t jump = U32(frameIndex - queue->currentFrameNumber);  // 0 = contiguous
+
+    if (queue->lastBlockRecvTimeUs == 0 || jump > fps) {
+        queue->advanceBaseTimeUs = nowUs;
+    }
+    else if (gapUs > 2000000 / fps) {
+        queue->advanceBaseTimeUs = queue->lastBlockRecvTimeUs;
+    }
+    else if (gapUs >= 1000000 / (2 * fps)) {
+        queue->advanceBaseTimeUs = nowUs;
+    }
+    queue->lastBlockRecvTimeUs = nowUs;
 }
 
 void RtpvInitializeQueue(PRTP_VIDEO_QUEUE queue) {
@@ -588,7 +618,13 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
 
 #ifndef LC_FUZZING
     if (isBefore32(nvPacket->frameIndex, queue->currentFrameNumber)) {
-        // Reject frames behind our current frame number
+        // Reject frames behind our current frame number. Frames two or more behind show the
+        // host still producing below the current one, so the far-ahead bound must not keep
+        // growing from the block that moved us ahead of them (C28-02); one-frame-late tails
+        // of the just-completed frame inside a drained backlog keep the stall credit.
+        if (queue->advanceBaseTimeUs != 0 && U32(queue->currentFrameNumber - nvPacket->frameIndex) > 1) {
+            queue->advanceBaseTimeUs = PltGetMicroseconds();
+        }
         return RTPF_RET_REJECTED;
     }
     if (!isFrameAdvancePlausible(queue, nvPacket->frameIndex)) {
@@ -708,13 +744,14 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
             }
         }
 
+        queue->bufferFirstRecvTimeUs = PltGetMicroseconds();
+        updateFrameAdvanceOrigin(queue, nvPacket->frameIndex, queue->bufferFirstRecvTimeUs);
         queue->currentFrameNumber = nvPacket->frameIndex;
 
         // Tell the control stream logic about this frame, even if we don't end up
         // being able to reconstruct a full frame from it.
         connectionSawFrame(queue->currentFrameNumber);
 
-        queue->bufferFirstRecvTimeUs = PltGetMicroseconds();
         queue->bufferLowestSequenceNumber = U16(packet->sequenceNumber - fecIndex);
         queue->nextContiguousSequenceNumber = queue->bufferLowestSequenceNumber;
         queue->receivedDataPackets = 0;
