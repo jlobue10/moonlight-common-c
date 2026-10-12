@@ -584,10 +584,13 @@ uint32_t RtpvGetCurrentFrameNumber(PRTP_VIDEO_QUEUE queue) {
 }
 
 int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_QUEUE_ENTRY packetEntry) {
-    if (isBefore16(packet->sequenceNumber, queue->nextContiguousSequenceNumber)) {
-        // Reject packets behind our current buffer window
-        return RTPF_RET_REJECTED;
-    }
+    // Packets behind the sequence window are rejected below, once the frame index is known:
+    // a frame strictly ahead of the current one must be allowed to move the window. The
+    // window base comes from whichever packet reinitialised the block, so one forged
+    // datagram with a plausible frame and a far-ahead sequence number used to park it
+    // 32768 packets ahead of the host and silence every genuine packet until the host
+    // caught up (C29-01).
+    bool behindWindow = isBefore16(packet->sequenceNumber, queue->nextContiguousSequenceNumber);
 
     // FLAG_EXTENSION is required for all supported versions of GFE.
     LC_ASSERT_VT(packet->header & FLAG_EXTENSION);
@@ -633,6 +636,14 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
         return RTPF_RET_REJECTED;
     }
 #endif
+
+    if (behindWindow && !isBefore32(queue->currentFrameNumber, nvPacket->frameIndex)) {
+        // Behind the window with a frame at or behind the current one: a late or duplicate
+        // packet. A frame strictly ahead means the host has moved past the window we are
+        // parked on (a forged base, or a loss longer than 32768 packets): it reinitialises
+        // the queue below like any other new frame (C29-01).
+        return RTPF_RET_REJECTED;
+    }
 
     uint32_t fecIndex = (nvPacket->fecInfo & 0x3FF000) >> 12;
     uint8_t fecCurrentBlockNumber = (nvPacket->multiFecBlocks >> 4) & 0x3;

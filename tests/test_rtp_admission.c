@@ -398,6 +398,35 @@ int main(void) {
     check(addPacket(123 + 360, 700, 0, 1, 1, 1) == RTPF_RET_REJECTED && queue.currentFrameNumber == 123,
           "chain: the window does not grow while the host is seen producing frames below the current one");
 
+    // C29-01: a far-ahead sequence number must not park the window either.
+    RtpvCleanupQueue(&queue);
+    RtpvInitializeQueue(&queue);
+    delivered = lostFrames = 0;
+    addPacket(1, 100, 0, 1, 1, 1);                                   // frame 1 at seq 100, current -> 2
+    check(addPacket(2, 100 + 32767, 0, 1, 1, 1) == RTPF_RET_QUEUED && queue.currentFrameNumber == 3,
+          "seq-forgery: a plausible frame with a far-ahead sequence number is admitted (one frame, by design)");
+    check(addPacket(3, 101, 0, 1, 1, 1) == RTPF_RET_REJECTED,
+          "seq-forgery: the frame the forgery displaced is lost");
+    check(addPacket(4, 102, 0, 1, 1, 1) == RTPF_RET_QUEUED && delivered == 3 && queue.currentFrameNumber == 5,
+          "seq-forgery: the next genuine frame is admitted behind the forged window");
+    check(addPacket(5, 103, 0, 1, 1, 1) == RTPF_RET_QUEUED && delivered == 4, "seq-forgery: delivery continues");
+
+    // C28-02 bypass: the chain with a high forged sequence number must still be cut by the re-stamp.
+    RtpvCleanupQueue(&queue);
+    RtpvInitializeQueue(&queue);
+    delivered = lostFrames = 0;
+    addPacket(1, 500, 0, 1, 1, 1);
+    check(addPacket(2 + 120, 500 + 30000, 0, 1, 1, 1) == RTPF_RET_QUEUED && queue.currentFrameNumber == 123,
+          "chain/seq: a jump inside the slack with a far-ahead sequence number is admitted (by design)");
+    for (uint32_t f = 2; f <= 121; f++) {
+        clockUs += 1000000 / 60;
+        if (addPacket(f, (uint16_t)(501 + f), 0, 1, 1, 1) != RTPF_RET_REJECTED) { check(0, "chain/seq: a genuine frame behind the forged one was admitted"); break; }
+    }
+    check(addPacket(123 + 360, 31000, 0, 1, 1, 1) == RTPF_RET_REJECTED && queue.currentFrameNumber == 123,
+          "chain/seq: the window does not grow while genuine frames arrive below it, whatever their sequence numbers");
+    check(addPacket(124, 623, 0, 1, 1, 1) == RTPF_RET_QUEUED,
+          "chain/seq: the first genuine frame strictly ahead of the forged one reinitialises the parked window");
+
     RtpvCleanupQueue(&queue);
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;
