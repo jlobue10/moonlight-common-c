@@ -39,6 +39,47 @@ typedef struct _STUN_MESSAGE {
 
 #pragma pack(pop)
 
+// Walks the attributes of a validated binding success response (bytesRead counts the bytes
+// after the message header) to XOR-MAPPED-ADDRESS. Returns 0 with *wanAddr set, -5 for a
+// malformed attribute and -6 when the response carries no IPv4 XOR-MAPPED-ADDRESS.
+static int stunFindXorMappedAddress(PSTUN_MESSAGE hdr, int bytesRead, unsigned int* wanAddr)
+{
+    PSTUN_ATTRIBUTE_HEADER attribute;
+    PSTUN_MAPPED_IPV4_ADDRESS_ATTRIBUTE ipv4Attrib;
+
+    attribute = (PSTUN_ATTRIBUTE_HEADER)(hdr + 1);
+    while (bytesRead > (int)sizeof(*attribute)) {
+        if (bytesRead < (int)(sizeof(*attribute) + htons(attribute->length))) {
+            Limelog("STUN attribute out of bounds: %d\n", htons(attribute->length));
+            return -5;
+        }
+        // Mask off the comprehension bit
+        else if ((htons(attribute->type) & 0x7FFF) != STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS) {
+            // Continue searching if this wasn't our address (skipping the attribute's padding)
+            bytesRead -= stunAttributeStride(htons(attribute->length));
+            attribute = (PSTUN_ATTRIBUTE_HEADER)(((char*)attribute) + stunAttributeStride(htons(attribute->length)));
+            continue;
+        }
+
+        ipv4Attrib = (PSTUN_MAPPED_IPV4_ADDRESS_ATTRIBUTE)attribute;
+        if (htons(ipv4Attrib->hdr.length) != 8) {
+            Limelog("STUN address length mismatch: %d\n", htons(ipv4Attrib->hdr.length));
+            return -5;
+        }
+        else if (ipv4Attrib->addressFamily != 1) {
+            Limelog("STUN address family mismatch: %x\n", ipv4Attrib->addressFamily);
+            return -5;
+        }
+
+        // The address is XORed with the cookie
+        *wanAddr = ipv4Attrib->address ^ hdr->magicCookie;
+        return 0;
+    }
+
+    Limelog("No XOR mapped address found in STUN response!\n");
+    return -6;
+}
+
 // This is extremely rudamentary STUN code simply for deriving the WAN IPv4 address when behind a NAT.
 int LiFindExternalAddressIP4(const char* stunServer, unsigned short stunPort, unsigned int* wanAddr)
 {
@@ -50,8 +91,6 @@ int LiFindExternalAddressIP4(const char* stunServer, unsigned short stunPort, un
     STUN_MESSAGE reqMsg;
     int i;
     int bytesRead;
-    PSTUN_ATTRIBUTE_HEADER attribute;
-    PSTUN_MAPPED_IPV4_ADDRESS_ATTRIBUTE ipv4Attrib;
     union {
         STUN_MESSAGE hdr;
         char buf[1024];
@@ -148,43 +187,7 @@ int LiFindExternalAddressIP4(const char* stunServer, unsigned short stunPort, un
         goto Exit;
     }
 
-    attribute = (PSTUN_ATTRIBUTE_HEADER)(&resp.hdr + 1);
-    bytesRead -= sizeof(resp.hdr);
-    while (bytesRead > (int)sizeof(*attribute)) {
-        if (bytesRead < (int)(sizeof(*attribute) + htons(attribute->length))) {
-            Limelog("STUN attribute out of bounds: %d\n", htons(attribute->length));
-            err = -5;
-            goto Exit;
-        }
-        // Mask off the comprehension bit
-        else if ((htons(attribute->type) & 0x7FFF) != STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS) {
-            // Continue searching if this wasn't our address (skipping the attribute's padding)
-            bytesRead -= stunAttributeStride(htons(attribute->length));
-            attribute = (PSTUN_ATTRIBUTE_HEADER)(((char*)attribute) + stunAttributeStride(htons(attribute->length)));
-            continue;
-        }
-
-        ipv4Attrib = (PSTUN_MAPPED_IPV4_ADDRESS_ATTRIBUTE)attribute;
-        if (htons(ipv4Attrib->hdr.length) != 8) {
-            Limelog("STUN address length mismatch: %d\n", htons(ipv4Attrib->hdr.length));
-            err = -5;
-            goto Exit;
-        }
-        else if (ipv4Attrib->addressFamily != 1) {
-            Limelog("STUN address family mismatch: %x\n", ipv4Attrib->addressFamily);
-            err = -5;
-            goto Exit;
-        }
-
-        // The address is XORed with the cookie
-        *wanAddr = ipv4Attrib->address ^ resp.hdr.magicCookie;
-
-        err = 0;
-        goto Exit;
-    }
-
-    Limelog("No XOR mapped address found in STUN response!\n");
-    err = -6;
+    err = stunFindXorMappedAddress(&resp.hdr, bytesRead - (int)sizeof(resp.hdr), wanAddr);
 
 Exit:
     if (sock != INVALID_SOCKET) {

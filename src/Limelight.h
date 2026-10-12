@@ -631,6 +631,11 @@ int LiSendMouseMoveEvent(short deltaX, short deltaY);
 //
 // For example, if you wanted to directly pass window coordinates as x and y, you would set
 // referenceWidth and referenceHeight to your window width and height.
+//
+// The reference plane must be at least 2x2: its far edge is referenceWidth - 1 by
+// referenceHeight - 1. Returns 0 when queued, -2 when no connection is active, -3 for a
+// reference plane smaller than 2x2 (nothing is queued) and a negative LBQ_* code when the
+// input queue refuses the event.
 int LiSendMousePositionEvent(short x, short y, short referenceWidth, short referenceHeight);
 
 // This function queues a mouse position update event to be sent to the remote server, so
@@ -650,6 +655,10 @@ int LiSendMousePositionEvent(short x, short y, short referenceWidth, short refer
 // This function can be useful when mouse capture is the only feasible way to receive mouse input,
 // like on Android or iOS, and the OS cannot provide raw unaccelerated mouse motion when capturing.
 // Using this function avoids double-acceleration in cases when the client motion is also accelerated.
+//
+// The virtual cursor is clamped to the far edge (referenceWidth - 1, referenceHeight - 1) and
+// starts at the centre of the plane for each connection. Returns -3 for a reference plane
+// smaller than 2x2 (the cursor does not move), otherwise what LiSendMousePositionEvent() returns.
 int LiSendMouseMoveAsMousePositionEvent(short deltaX, short deltaY, short referenceWidth, short referenceHeight);
 
 // Error return value to indicate that the requested functionality is not supported by the host
