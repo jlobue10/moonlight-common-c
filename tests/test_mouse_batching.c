@@ -153,6 +153,40 @@ int main(void) {
     drain();
     check(sends == 1 && sent[0].x == 13 && sent[0].y == 15, "retry contains only accepted movement");
 
+    // Relative-as-absolute motion must invert the ref - 1 normalization. A
+    // one-pixel negative move must escape the right/bottom edges immediately.
+    LiSendMousePositionEvent(1919, 1079, 1920, 1080);
+    LiSendMouseMoveAsMousePositionEvent(-1, -1, 1920, 1080);
+    drain();
+    check(sends == 1 && sent[0].x == 1918 && sent[0].y == 1078,
+          "single-pixel motion leaves the right and bottom edges");
+    LiSendMousePositionEvent(1919, 1079, 1920, 1080);
+    for (int i = 0; i < 20; ++i) LiSendMouseMoveAsMousePositionEvent(-1, -1, 1920, 1080);
+    drain();
+    check(sends == 1 && sent[0].x == 1899 && sent[0].y == 1059,
+          "repeated fine motion does not stick at the far edges");
+    bool stable = true;
+    for (int x = 0; x < 32767; ++x) {
+        LiSendMousePositionEvent((short)x, (short)x, 32767, 32767);
+        LiSendMouseMoveAsMousePositionEvent(0, 0, 32767, 32767);
+        stable &= BE16(currentQueuedMousePacket->packet.mouseMoveAbs.x) == x &&
+                  BE16(currentQueuedMousePacket->packet.mouseMoveAbs.y) == x;
+    }
+    drain();
+    check(stable, "zero motion preserves every position on the largest reference plane");
+    LiSendMousePositionEvent(1919, 1079, 1920, 1080);
+    LiSendMouseMoveAsMousePositionEvent(-1, -1, 3840, 2160);
+    drain();
+    check(sends == 1 && sent[0].x == 3838 && sent[0].y == 2158,
+          "dimension changes retain the normalized far edge before applying motion");
+    LiSendMousePositionEvent(0, 0, 1920, 1080);
+    LiSendMouseMoveAsMousePositionEvent(-32768, -32768, 1920, 1080);
+    drain();
+    check(sends == 1 && sent[0].x == 0 && sent[0].y == 0, "motion still clamps to the near edges");
+    check(LiSendMouseMoveAsMousePositionEvent(1, 1, 1, 1080) == -3 &&
+          LiSendMouseMoveAsMousePositionEvent(1, 1, 1920, 0) == -3 &&
+          LbqGetItemCount(&packetQueue) == 0, "degenerate relative reference planes queue no input");
+
     initialized = false;
     LbqSignalQueueShutdown(&packetHolderFreeList);
     LbqSignalQueueShutdown(&packetQueue);

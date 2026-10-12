@@ -825,9 +825,19 @@ int LiSendMousePositionEvent(short x, short y, short referenceWidth, short refer
 
 // Send a relative motion event using absolute position to the streaming machine
 int LiSendMouseMoveAsMousePositionEvent(short deltaX, short deltaY, short referenceWidth, short referenceHeight) {
-    // Convert the current position to be relative to the provided reference dimensions
-    short oldPositionX = (short)(absCurrentPosX * referenceWidth);
-    short oldPositionY = (short)(absCurrentPosY * referenceHeight);
+    if (!initialized) {
+        return -2;
+    }
+    if (referenceWidth < 2 || referenceHeight < 2) {
+        return -3;
+    }
+
+    // Invert the ref - 1 normalization used by LiSendMousePositionEvent().
+    // Multiplying by ref made a -1 movement from the far edge land on that same
+    // edge forever. Round the nonnegative position so float round trips do not
+    // lose a pixel, including when a caller supplies new reference dimensions.
+    short oldPositionX = (short)(absCurrentPosX * (referenceWidth - 1) + 0.5f);
+    short oldPositionY = (short)(absCurrentPosY * (referenceHeight - 1) + 0.5f);
 
     // The far edge of the plane is ref - 1, as LiSendMousePositionEvent encodes it.
     return LiSendMousePositionEvent(CLAMP(oldPositionX + deltaX, 0, referenceWidth - 1),
