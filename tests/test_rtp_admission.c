@@ -333,6 +333,40 @@ int main(void) {
     check(addPacket(1103 + 1400, 7000, 0, 2, 1, 0) == RTPF_RET_REJECTED && queue.currentFrameNumber == 1103,
           "far-ahead: a jump beyond what the stall allows is still rejected");
 
+    // Frame indexes are 32-bit even though RTP sequence numbers are 16-bit.
+    // A jump by a multiple of 65536 must not alias a plausible current frame.
+    const uint32_t aliasedAdvances[] = {65536u, 65537u, 0x01000000u, 0x40000000u, 0u - 65536u};
+    for (unsigned int i = 0; i < sizeof(aliasedAdvances) / sizeof(aliasedAdvances[0]); i++) {
+        RtpvCleanupQueue(&queue);
+        RtpvInitializeQueue(&queue);
+        delivered = lostFrames = 0;
+        addPacket(1, 8000, 0, 1, 1, 1);
+        check(addPacket(2 + aliasedAdvances[i], 8001, 0, 1, 1, 1) == RTPF_RET_REJECTED &&
+              queue.currentFrameNumber == 2 && delivered == 1 && lostFrames == 0,
+              "32-bit frame advance cannot bypass admission by aliasing its low 16 bits");
+        check(addPacket(2, 8001, 0, 1, 1, 1) == RTPF_RET_QUEUED && delivered == 2,
+              "genuine next frame remains deliverable after an aliased frame is rejected");
+    }
+    RtpvCleanupQueue(&queue);
+    RtpvInitializeQueue(&queue);
+    delivered = lostFrames = 0;
+    addPacket(1, 9000, 0, 1, 1, 1);
+    clockUs += 600ull * 1000000; // A real ten-minute pause permits a 40000-frame advance.
+    check(addPacket(40002, 9001, 0, 1, 1, 1) == RTPF_RET_QUEUED && delivered == 2,
+          "a plausible advance beyond the 16-bit half-range is accepted after a long stall");
+
+    RtpvCleanupQueue(&queue);
+    RtpvInitializeQueue(&queue);
+    delivered = lostFrames = 0;
+    queue.currentFrameNumber = UINT32_MAX - 1;
+    queue.bufferFirstRecvTimeUs = clockUs;
+    check(addPacket(1, 10000, 0, 1, 1, 1) == RTPF_RET_QUEUED && delivered == 1 && lostFrames == 1,
+          "a small forward advance across the 32-bit wrap remains valid");
+    check(addPacket(UINT32_MAX, 10001, 0, 1, 1, 1) == RTPF_RET_REJECTED && queue.currentFrameNumber == 2,
+          "a stale frame from before the 32-bit wrap is rejected");
+    check(addPacket(2, 10001, 0, 1, 1, 1) == RTPF_RET_QUEUED && delivered == 2,
+          "delivery continues normally after the 32-bit wrap");
+
     RtpvCleanupQueue(&queue);
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;

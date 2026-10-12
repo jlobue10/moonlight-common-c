@@ -35,7 +35,8 @@ static bool isFrameAdvancePlausible(PRTP_VIDEO_QUEUE queue, uint32_t frameIndex)
     fps = StreamConfig.fps > 0 ? (uint64_t)StreamConfig.fps : 60;
     elapsedUs = PltGetMicroseconds() - queue->bufferFirstRecvTimeUs;
     maxAhead = (elapsedUs * fps * 2) / 1000000 + fps * FRAME_ADVANCE_SLACK_SECONDS;
-    return U16(frameIndex - queue->currentFrameNumber) <= maxAhead;
+    // Frame indexes use the full 32-bit wire value, unlike RTP sequence numbers.
+    return U32(frameIndex - queue->currentFrameNumber) <= maxAhead;
 }
 
 void RtpvInitializeQueue(PRTP_VIDEO_QUEUE queue) {
@@ -586,7 +587,7 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
     }
 
 #ifndef LC_FUZZING
-    if (isBefore16(nvPacket->frameIndex, queue->currentFrameNumber)) {
+    if (isBefore32(nvPacket->frameIndex, queue->currentFrameNumber)) {
         // Reject frames behind our current frame number
         return RTPF_RET_REJECTED;
     }
@@ -695,7 +696,7 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
         // The check here looks weird, but that's because we increment the frame number
         // after successfully processing a frame.
         if (queue->currentFrameNumber != nvPacket->frameIndex) {
-            LC_ASSERT_VT(queue->currentFrameNumber < nvPacket->frameIndex);
+            LC_ASSERT_VT(isBefore32(queue->currentFrameNumber, nvPacket->frameIndex));
 
             // If the frame immediately preceding this one was lost, we may have already
             // reported it using our speculative RFI logic. Don't report it again.
