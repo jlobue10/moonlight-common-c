@@ -323,8 +323,11 @@ static void AudioReceiveThreadProc(void* context) {
         // GFE accumulates audio samples before we are ready to receive them, so
         // we will drop the ones that arrived before the receive thread was ready.
         if (packetsToDrop > 0) {
-            // Only count actual audio data (not FEC) in the packets to drop calculation
-            if (rtp->packetType == 97) {
+            // Only count actual audio data (not FEC) in the packets to drop calculation:
+            // an RTP v2 packet with a payload. A bare 12-byte header with byte 1 == 97 is
+            // not audio and must not spend the budget (C27-03).
+            if (rtp->packetType == 97 && (rtp->header & 0xC0) == 0x80 &&
+                    packet->header.size > (int)sizeof(RTP_PACKET)) {
                 packetsToDrop--;
             }
             continue;

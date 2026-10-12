@@ -4,10 +4,28 @@
 // started and tears down threads that were never created.
 #include "../src/Limelight-internal.h"
 static SOCKET testBind(int addressFamily, struct sockaddr_storage* localAddr, SOCKADDR_LEN addrLen, int bufferSize, int qosType);
+static int testRecv(SOCKET s, char* buffer, int size, bool useSelect);
 #define bindUdpSocket testBind
+#define recvUdpSocket testRecv
 #include "../src/VideoStream.c"
 #undef bindUdpSocket
+#undef recvUdpSocket
 #include <stdio.h>
+
+// The receive thread is driven by a script of datagram sizes: 0 = poll timeout, -1 ends it.
+static int script[256], scriptLen, scriptPos, terminations, lastTermination;
+static int testRecv(SOCKET s, char* buffer, int size, bool useSelect) {
+    (void)s; (void)useSelect;
+    int n = scriptPos < scriptLen ? script[scriptPos++] : -1;
+    if (n > 0) {
+        // A zeroed RTP packet with the extension flag (asserted on in debug builds)
+        // and frame index 0, which the queue rejects as behind frame 1.
+        memset(buffer, 0, n < size ? n : size);
+        buffer[0] = FLAG_EXTENSION;
+    }
+    return n;
+}
+static void stubTerminated(int code) { ++terminations; lastTermination = code; }
 
 static int binds, setups, starts, cleanups, checks, failures;
 static SOCKET testBind(int addressFamily, struct sockaddr_storage* localAddr, SOCKADDR_LEN addrLen, int bufferSize, int qosType) {
@@ -41,6 +59,30 @@ int main(void) {
     check(binds == 1 && setups == 1, "the decoder is set up and the RTP socket bound");
     check(err != 0, "a failed bind with a zero platform error is still reported as a failure");
     check(cleanups == 1 && starts == 0, "the decoder is cleaned up once and never started");
+
+    // C27-02: a runt before the host's first packet must not disarm the no-traffic timeout.
+    // The timeout counts 100 ms polls, so a hundred zero returns model ten seconds of silence.
+    ListenerCallbacks.connectionTerminated = stubTerminated;
+    EncryptionFeaturesEnabled = 0;
+    check(initializeVideoStream() == 0, "video stream initialized for the receive-thread cases");
+    scriptLen = 0;
+    script[scriptLen++] = 3;
+    for (int i = 0; i < 100; i++) script[scriptLen++] = 0;
+    scriptPos = terminations = 0;
+    VideoReceiveThreadProc(NULL);
+    check(terminations == 1 && lastTermination == ML_ERROR_NO_VIDEO_TRAFFIC,
+          "a runt datagram before the first packet does not disarm the no-traffic timeout");
+    destroyVideoStream();
+
+    check(initializeVideoStream() == 0, "video stream re-initialized");
+    scriptLen = 0;
+    script[scriptLen++] = (int)(sizeof(RTP_PACKET) + 4 + sizeof(NV_VIDEO_PACKET));
+    for (int i = 0; i < 100; i++) script[scriptLen++] = 0;
+    scriptPos = terminations = 0;
+    VideoReceiveThreadProc(NULL);
+    check(terminations == 1 && lastTermination != ML_ERROR_NO_VIDEO_TRAFFIC,
+          "a full RTP video packet still counts as the host's first packet");
+    destroyVideoStream();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;

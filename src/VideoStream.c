@@ -197,25 +197,9 @@ static void VideoReceiveThreadProc(void* context) {
             continue;
         }
 
-        if (!receivedDataFromPeer) {
-            receivedDataFromPeer = true;
-            Limelog("Received first video packet after %d ms\n", waitingForVideoMs);
-
-            firstDataTimeMs = PltGetMillis();
-        }
-
-#ifndef LC_FUZZING
-        if (!receivedFullFrame) {
-            if (PltGetMillis() - firstDataTimeMs >= FIRST_FRAME_TIMEOUT_SEC * 1000) {
-                Limelog("Terminating connection due to lack of a successful video frame\n");
-                ListenerCallbacks.connectionTerminated(ML_ERROR_NO_VIDEO_FRAME);
-                break;
-            }
-        }
-#endif
-
         if (err < minSize) {
-            // Runt packet
+            // Runt packet: not evidence of the host, so it neither starts the first-frame
+            // clock nor disarms the no-traffic timeout (C27-02).
             continue;
         }
 
@@ -258,6 +242,25 @@ static void VideoReceiveThreadProc(void* context) {
                 continue;
             }
         }
+
+        // Only a datagram that is at least a full RTP header (and, when encrypted, one
+        // that authenticated) counts as traffic from the host.
+        if (!receivedDataFromPeer) {
+            receivedDataFromPeer = true;
+            Limelog("Received first video packet after %d ms\n", waitingForVideoMs);
+
+            firstDataTimeMs = PltGetMillis();
+        }
+
+#ifndef LC_FUZZING
+        if (!receivedFullFrame) {
+            if (PltGetMillis() - firstDataTimeMs >= FIRST_FRAME_TIMEOUT_SEC * 1000) {
+                Limelog("Terminating connection due to lack of a successful video frame\n");
+                ListenerCallbacks.connectionTerminated(ML_ERROR_NO_VIDEO_FRAME);
+                break;
+            }
+        }
+#endif
 
         // Convert fields to host byte-order
         packet = (PRTP_PACKET)&buffer[0];
