@@ -485,7 +485,10 @@ uint64_t PltGetMicroseconds(void) {
     }
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
-    return (uint64_t)(((now.QuadPart - start_ticks.QuadPart) * 1000000) / ticks_per_second.QuadPart);
+    // Split the conversion: ticks * 1000000 overflowed int64 after ~10.7 days at 10 MHz.
+    const uint64_t ticks = (uint64_t)(now.QuadPart - start_ticks.QuadPart);
+    const uint64_t freq = (uint64_t)ticks_per_second.QuadPart;
+    return (ticks / freq) * 1000000 + ((ticks % freq) * 1000000) / freq;
 }
 
 #elif defined(LC_DARWIN)

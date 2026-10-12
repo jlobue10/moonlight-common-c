@@ -781,6 +781,12 @@ int LiSendMousePositionEvent(short x, short y, short referenceWidth, short refer
         return -2;
     }
 
+    // A plane narrower than 2 has no far edge: the wire carries ref - 1 and the virtual
+    // cursor divides by it (0/0.0f was NaN, later cast to short).
+    if (referenceWidth < 2 || referenceHeight < 2) {
+        return -3;
+    }
+
     PltLockMutex(&batchedInputMutex);
     holder = currentQueuedMousePacket;
     if (holder == NULL || holder->packet.header.magic != LE32(MOUSE_MOVE_ABS_MAGIC) ||
@@ -823,8 +829,9 @@ int LiSendMouseMoveAsMousePositionEvent(short deltaX, short deltaY, short refere
     short oldPositionX = (short)(absCurrentPosX * referenceWidth);
     short oldPositionY = (short)(absCurrentPosY * referenceHeight);
 
-    return LiSendMousePositionEvent(CLAMP(oldPositionX + deltaX, 0, referenceWidth),
-                                    CLAMP(oldPositionY + deltaY, 0, referenceHeight),
+    // The far edge of the plane is ref - 1, as LiSendMousePositionEvent encodes it.
+    return LiSendMousePositionEvent(CLAMP(oldPositionX + deltaX, 0, referenceWidth - 1),
+                                    CLAMP(oldPositionY + deltaY, 0, referenceHeight - 1),
                                     referenceWidth, referenceHeight);
 }
 

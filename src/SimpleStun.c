@@ -16,6 +16,12 @@ typedef struct _STUN_ATTRIBUTE_HEADER {
     unsigned short length;
 } STUN_ATTRIBUTE_HEADER, *PSTUN_ATTRIBUTE_HEADER;
 
+// Attributes are padded to a 32-bit boundary (RFC 5389 section 15); the length field
+// excludes the padding, the next attribute starts after it.
+static int stunAttributeStride(unsigned short length) {
+    return (int)sizeof(STUN_ATTRIBUTE_HEADER) + ((length + 3) & ~3);
+}
+
 typedef struct _STUN_MAPPED_IPV4_ADDRESS_ATTRIBUTE {
     STUN_ATTRIBUTE_HEADER hdr;
     unsigned char reserved;
@@ -152,9 +158,9 @@ int LiFindExternalAddressIP4(const char* stunServer, unsigned short stunPort, un
         }
         // Mask off the comprehension bit
         else if ((htons(attribute->type) & 0x7FFF) != STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS) {
-            // Continue searching if this wasn't our address
-            bytesRead -= sizeof(*attribute) + htons(attribute->length);
-            attribute = (PSTUN_ATTRIBUTE_HEADER)(((char*)attribute) + sizeof(*attribute) + htons(attribute->length));
+            // Continue searching if this wasn't our address (skipping the attribute's padding)
+            bytesRead -= stunAttributeStride(htons(attribute->length));
+            attribute = (PSTUN_ATTRIBUTE_HEADER)(((char*)attribute) + stunAttributeStride(htons(attribute->length)));
             continue;
         }
 
