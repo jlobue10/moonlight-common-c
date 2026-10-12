@@ -56,8 +56,10 @@ done
 "$build/test-rtsp_opus_params"
 "$build/test-stun_padding"
 "$build/test-audio_start"
-"$build/test-rtsp_transact"
-"$build/test-connection_start"
+# These two include RtspConnection.c / Connection.c, whose globals the shared library also
+# defines; ASan reports the deliberate shadowing as an ODR violation, so that check is off here.
+ASAN_OPTIONS="${ASAN_OPTIONS:+$ASAN_OPTIONS:}detect_odr_violation=0" "$build/test-rtsp_transact"
+ASAN_OPTIONS="${ASAN_OPTIONS:+$ASAN_OPTIONS:}detect_odr_violation=0" "$build/test-connection_start"
 "$build/test-depacketizer"
 "$build/test-platform_init"
 "$build/test-video-format"
