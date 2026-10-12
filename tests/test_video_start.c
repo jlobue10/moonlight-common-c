@@ -2,6 +2,7 @@
 // failure even when the platform error code reads zero (LastSocketFail), with the
 // decoder cleaned up exactly once, so LiStartConnection never records the stage as
 // started and tears down threads that were never created.
+#define PltGetMillis testGetMillis
 #include "../src/Limelight-internal.h"
 static SOCKET testBind(int addressFamily, struct sockaddr_storage* localAddr, SOCKADDR_LEN addrLen, int bufferSize, int qosType);
 static int testRecv(SOCKET s, char* buffer, int size, bool useSelect);
@@ -10,12 +11,18 @@ static int testRecv(SOCKET s, char* buffer, int size, bool useSelect);
 #include "../src/VideoStream.c"
 #undef bindUdpSocket
 #undef recvUdpSocket
+#undef PltGetMillis
 #include <stdio.h>
 
 // The receive thread is driven by a script of datagram sizes: 0 = poll timeout, -1 ends it.
 static int script[256], scriptLen, scriptPos, terminations, lastTermination;
+static uint64_t clockMs = 1000;
+uint64_t testGetMillis(void) { return clockMs; }
 static int testRecv(SOCKET s, char* buffer, int size, bool useSelect) {
     (void)s; (void)useSelect;
+    // Each scripted receive happens 100 ms later, including successful garbage
+    // reads. Wall time must advance even if recv() never reports a timeout.
+    clockMs += UDP_RECV_POLL_TIMEOUT_MS;
     int n = scriptPos < scriptLen ? script[scriptPos++] : -1;
     if (n > 0) {
         // A zeroed RTP packet with the extension flag (asserted on in debug builds)
@@ -61,7 +68,7 @@ int main(void) {
     check(cleanups == 1 && starts == 0, "the decoder is cleaned up once and never started");
 
     // C27-02: a runt before the host's first packet must not disarm the no-traffic timeout.
-    // The timeout counts 100 ms polls, so a hundred zero returns model ten seconds of silence.
+    // A hundred receives model ten seconds on the monotonic clock.
     ListenerCallbacks.connectionTerminated = stubTerminated;
     EncryptionFeaturesEnabled = 0;
     check(initializeVideoStream() == 0, "video stream initialized for the receive-thread cases");
@@ -80,8 +87,42 @@ int main(void) {
     for (int i = 0; i < 100; i++) script[scriptLen++] = 0;
     scriptPos = terminations = 0;
     VideoReceiveThreadProc(NULL);
-    check(terminations == 1 && lastTermination != ML_ERROR_NO_VIDEO_TRAFFIC,
-          "a full RTP video packet still counts as the host's first packet");
+    check(terminations == 1 && lastTermination == ML_ERROR_NO_VIDEO_FRAME,
+          "an incomplete first frame followed by silence expires the first-frame deadline");
+    destroyVideoStream();
+
+    for (int first = 0; first <= 1; first++) {
+        check(initializeVideoStream() == 0, "video initialized for continuous-runt deadline case");
+        scriptLen = 0;
+        if (first) script[scriptLen++] = (int)(sizeof(RTP_PACKET) + 4 + sizeof(NV_VIDEO_PACKET));
+        for (int i = 0; i < 110; i++) script[scriptLen++] = 3;
+        scriptPos = terminations = 0;
+        VideoReceiveThreadProc(NULL);
+        check(terminations == 1 && lastTermination == (first ? ML_ERROR_NO_VIDEO_FRAME : ML_ERROR_NO_VIDEO_TRAFFIC),
+              "continuous runt datagrams cannot extend either video startup deadline");
+        destroyVideoStream();
+    }
+    EncryptionFeaturesEnabled = SS_ENC_VIDEO;
+    check(initializeVideoStream() == 0, "video initialized for failed-authentication deadline case");
+    scriptLen = 0;
+    for (int i = 0; i < 110; i++) script[scriptLen++] = (int)(sizeof(ENC_VIDEO_HEADER) + sizeof(RTP_PACKET) + 4 + sizeof(NV_VIDEO_PACKET));
+    scriptPos = terminations = 0;
+    VideoReceiveThreadProc(NULL);
+    check(terminations == 1 && lastTermination == ML_ERROR_NO_VIDEO_TRAFFIC,
+          "continuous unauthenticated encrypted packets cannot extend the no-traffic deadline");
+    destroyVideoStream();
+
+    EncryptionFeaturesEnabled = 0;
+    check(initializeVideoStream() == 0, "video initialized for completed-frame control case");
+    receivedDataFromPeer = true;
+    firstDataTimeMs = clockMs;
+    notifyKeyFrameReceived();
+    scriptLen = 0;
+    for (int i = 0; i < 110; i++) script[scriptLen++] = 0;
+    scriptPos = terminations = 0;
+    VideoReceiveThreadProc(NULL);
+    check(scriptPos == scriptLen && lastTermination != ML_ERROR_NO_VIDEO_FRAME && lastTermination != ML_ERROR_NO_VIDEO_TRAFFIC,
+          "a successfully received frame retires the startup deadline");
     destroyVideoStream();
 
     printf("%d checks, %d failures\n", checks, failures);

@@ -127,7 +127,7 @@ static void VideoReceiveThreadProc(void* context) {
     char* encryptedBuffer;
     int queueStatus;
     bool useSelect;
-    int waitingForVideoMs;
+    uint64_t waitingForVideoSinceMs;
     bool encrypted;
 
     encrypted = !!(EncryptionFeaturesEnabled & SS_ENC_VIDEO);
@@ -159,7 +159,7 @@ static void VideoReceiveThreadProc(void* context) {
         encryptedBuffer = NULL;
     }
 
-    waitingForVideoMs = 0;
+    waitingForVideoSinceMs = PltGetMillis();
     while (!PltIsThreadInterrupted(&receiveThread)) {
         PRTP_PACKET packet;
 
@@ -181,18 +181,23 @@ static void VideoReceiveThreadProc(void* context) {
             ListenerCallbacks.connectionTerminated(LastSocketFail());
             break;
         }
-        else if  (err == 0) {
-            if (!receivedDataFromPeer) {
-                // If we wait many seconds without ever receiving a video packet,
-                // assume something is broken and terminate the connection.
-                waitingForVideoMs += UDP_RECV_POLL_TIMEOUT_MS;
-                if (waitingForVideoMs >= FIRST_FRAME_TIMEOUT_SEC * 1000) {
-                    Limelog("Terminating connection due to lack of video traffic\n");
-                    ListenerCallbacks.connectionTerminated(ML_ERROR_NO_VIDEO_TRAFFIC);
-                    break;
-                }
-            }
+        // Startup deadlines must advance on every receive outcome, including silence,
+        // runt packets and failed authentication. None of these is startup progress.
+        uint64_t nowMs = PltGetMillis();
+        if (!receivedDataFromPeer && nowMs - waitingForVideoSinceMs >= FIRST_FRAME_TIMEOUT_SEC * 1000) {
+            Limelog("Terminating connection due to lack of video traffic\n");
+            ListenerCallbacks.connectionTerminated(ML_ERROR_NO_VIDEO_TRAFFIC);
+            break;
+        }
+#ifndef LC_FUZZING
+        if (receivedDataFromPeer && !receivedFullFrame && nowMs - firstDataTimeMs >= FIRST_FRAME_TIMEOUT_SEC * 1000) {
+            Limelog("Terminating connection due to lack of a successful video frame\n");
+            ListenerCallbacks.connectionTerminated(ML_ERROR_NO_VIDEO_FRAME);
+            break;
+        }
+#endif
 
+        if (err == 0) {
             // Receive timed out; try again
             continue;
         }
@@ -247,20 +252,10 @@ static void VideoReceiveThreadProc(void* context) {
         // that authenticated) counts as traffic from the host.
         if (!receivedDataFromPeer) {
             receivedDataFromPeer = true;
-            Limelog("Received first video packet after %d ms\n", waitingForVideoMs);
+            Limelog("Received first video packet after %d ms\n", (int)(nowMs - waitingForVideoSinceMs));
 
-            firstDataTimeMs = PltGetMillis();
+            firstDataTimeMs = nowMs;
         }
-
-#ifndef LC_FUZZING
-        if (!receivedFullFrame) {
-            if (PltGetMillis() - firstDataTimeMs >= FIRST_FRAME_TIMEOUT_SEC * 1000) {
-                Limelog("Terminating connection due to lack of a successful video frame\n");
-                ListenerCallbacks.connectionTerminated(ML_ERROR_NO_VIDEO_FRAME);
-                break;
-            }
-        }
-#endif
 
         // Convert fields to host byte-order
         packet = (PRTP_PACKET)&buffer[0];
