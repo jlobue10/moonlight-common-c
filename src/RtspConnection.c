@@ -394,6 +394,7 @@ static bool transactRtspMessageTcp(PRTSP_MESSAGE request, PRTSP_MESSAGE response
     char* responseBuffer;
     int responseBufferSize;
     int connectRetries;
+    uint64_t deadlineMs;
 
     *error = -1;
     ret = false;
@@ -443,11 +444,16 @@ static bool transactRtspMessageTcp(PRTSP_MESSAGE request, PRTSP_MESSAGE response
         goto Exit;
     }
 
-    // Read the response until the server closes the connection
+    // Read the response until the server closes the connection. One deadline for the
+    // whole reply: a host that trickles bytes must not hold the connection thread for
+    // another timeout per chunk, and LiInterruptConnection() must be able to end the
+    // wait (the ENet transport already polls the flag in serviceEnetHost).
+    deadlineMs = PltGetMillis() + RTSP_RECEIVE_TIMEOUT_SEC * 1000;
     offset = 0;
     responseBufferSize = 0;
     for (;;) {
         struct pollfd pfd;
+        uint64_t nowMs;
 
         if (offset >= responseBufferSize) {
             if ((size_t)offset >= MAX_RTSP_RESPONSE_SIZE) {
@@ -465,13 +471,24 @@ static bool transactRtspMessageTcp(PRTSP_MESSAGE request, PRTSP_MESSAGE response
             }
         }
 
-        pfd.fd = sock;
-        pfd.events = POLLIN;
-        err = pollSockets(&pfd, 1, RTSP_RECEIVE_TIMEOUT_SEC * 1000);
-        if (err == 0) {
+        if (ConnectionInterrupted) {
+            *error = EINTR;
+            Limelog("RTSP request interrupted\n");
+            goto Exit;
+        }
+        nowMs = PltGetMillis();
+        if (nowMs >= deadlineMs) {
             *error = ETIMEDOUT;
             Limelog("RTSP request timed out\n");
             goto Exit;
+        }
+
+        pfd.fd = sock;
+        pfd.events = POLLIN;
+        err = pollSockets(&pfd, 1, (int)((deadlineMs - nowMs) < 100 ? (deadlineMs - nowMs) : 100));
+        if (err == 0) {
+            // Slice elapsed: the deadline and the interrupt flag are re-checked above
+            continue;
         }
         else if (err < 0) {
             *error = LastSocketError();
