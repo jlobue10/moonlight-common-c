@@ -17,7 +17,12 @@ static int script[256], scriptLen, scriptPos, terminations, lastTermination;
 static int testRecv(SOCKET s, char* buffer, int size, bool useSelect) {
     (void)s; (void)useSelect;
     int n = scriptPos < scriptLen ? script[scriptPos++] : -1;
-    if (n > 0) memset(buffer, 0, n < size ? n : size);
+    if (n > 0) {
+        // A zeroed RTP packet with the extension flag (asserted on in debug builds)
+        // and frame index 0, which the queue rejects as behind frame 1.
+        memset(buffer, 0, n < size ? n : size);
+        buffer[0] = FLAG_EXTENSION;
+    }
     return n;
 }
 static void stubTerminated(int code) { ++terminations; lastTermination = code; }
@@ -71,12 +76,12 @@ int main(void) {
 
     check(initializeVideoStream() == 0, "video stream re-initialized");
     scriptLen = 0;
-    script[scriptLen++] = (int)sizeof(RTP_PACKET);
+    script[scriptLen++] = (int)(sizeof(RTP_PACKET) + 4 + sizeof(NV_VIDEO_PACKET));
     for (int i = 0; i < 100; i++) script[scriptLen++] = 0;
     scriptPos = terminations = 0;
     VideoReceiveThreadProc(NULL);
     check(terminations == 1 && lastTermination != ML_ERROR_NO_VIDEO_TRAFFIC,
-          "a full RTP header still counts as the host's first packet");
+          "a full RTP video packet still counts as the host's first packet");
     destroyVideoStream();
 
     printf("%d checks, %d failures\n", checks, failures);
