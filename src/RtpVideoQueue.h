@@ -24,6 +24,10 @@ typedef struct _RTP_VIDEO_QUEUE {
     RTPV_QUEUE_LIST completedFecBlockList;
 
     uint64_t bufferFirstRecvTimeUs;
+    // Origin of the far-ahead frame bound (see isFrameAdvancePlausible) and the receive
+    // time of the last block reinitialisation; both zero until the first block.
+    uint64_t advanceBaseTimeUs;
+    uint64_t lastBlockRecvTimeUs;
     uint32_t bufferLowestSequenceNumber;
     uint32_t bufferHighestSequenceNumber;
     uint32_t bufferFirstParitySequenceNumber;

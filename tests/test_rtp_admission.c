@@ -359,13 +359,44 @@ int main(void) {
     RtpvInitializeQueue(&queue);
     delivered = lostFrames = 0;
     queue.currentFrameNumber = UINT32_MAX - 1;
-    queue.bufferFirstRecvTimeUs = clockUs;
+    queue.bufferFirstRecvTimeUs = queue.advanceBaseTimeUs = queue.lastBlockRecvTimeUs = clockUs;
     check(addPacket(1, 10000, 0, 1, 1, 1) == RTPF_RET_QUEUED && delivered == 1 && lostFrames == 1,
           "a small forward advance across the 32-bit wrap remains valid");
     check(addPacket(UINT32_MAX, 10001, 0, 1, 1, 1) == RTPF_RET_REJECTED && queue.currentFrameNumber == 2,
           "a stale frame from before the 32-bit wrap is rejected");
     check(addPacket(2, 10001, 0, 1, 1, 1) == RTPF_RET_QUEUED && delivered == 2,
           "delivery continues normally after the 32-bit wrap");
+
+    // C28-01: frames drained from the kernel backlog after a receive-thread stall arrive in a
+    // burst (the harness clock advances 1 us per call); the live frames behind them must
+    // still be admitted, and the live jump spends the stall credit.
+    RtpvCleanupQueue(&queue);
+    RtpvInitializeQueue(&queue);
+    delivered = lostFrames = 0;
+    check(addPacket(1, 100, 0, 1, 1, 1) == RTPF_RET_QUEUED, "backlog: frame 1 delivered");
+    clockUs += 5 * 1000000;  // the receive thread stalled for five seconds; the kernel kept 60 frames
+    for (uint32_t f = 2; f <= 61; f++) {
+        if (addPacket(f, (uint16_t)(99 + f), 0, 1, 1, 1) != RTPF_RET_QUEUED) { check(0, "backlog: a buffered frame was refused"); break; }
+    }
+    check(delivered == 61, "backlog: the sixty buffered frames are delivered in a burst");
+    check(addPacket(302, 400, 0, 1, 1, 1) == RTPF_RET_QUEUED && delivered == 62 && lostFrames == 1,
+          "backlog: the first live frame (240 ahead after a 5 s stall) is admitted");
+    check(addPacket(303 + 30000, 401, 0, 1, 1, 1) == RTPF_RET_REJECTED && queue.currentFrameNumber == 303,
+          "backlog: the live jump spent the credit; a forged far-ahead frame is still refused");
+
+    // C28-02: a forged jump inside the slack must not widen the window for the next one.
+    RtpvCleanupQueue(&queue);
+    RtpvInitializeQueue(&queue);
+    delivered = lostFrames = 0;
+    addPacket(1, 500, 0, 1, 1, 1);
+    check(addPacket(2 + 120, 501, 0, 1, 1, 1) == RTPF_RET_QUEUED && queue.currentFrameNumber == 123,
+          "chain: a jump inside the two-second slack is admitted (by design)");
+    for (uint32_t f = 2; f <= 121; f++) {  // two seconds of genuine frames, all behind the forged one
+        clockUs += 1000000 / 60;
+        if (addPacket(f, (uint16_t)(501 + f), 0, 1, 1, 1) != RTPF_RET_REJECTED) { check(0, "chain: a genuine frame behind the forged one was admitted"); break; }
+    }
+    check(addPacket(123 + 360, 700, 0, 1, 1, 1) == RTPF_RET_REJECTED && queue.currentFrameNumber == 123,
+          "chain: the window does not grow while the host is seen producing frames below the current one");
 
     RtpvCleanupQueue(&queue);
     printf("%d checks, %d failures\n", checks, failures);
