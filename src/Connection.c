@@ -2,10 +2,12 @@
 
 static int stage = STAGE_NONE;
 static ConnListenerConnectionTerminated originalTerminationCallback;
+// Zero means active. A termination claim publishes its nonzero startup error in
+// the same atomic operation; graceful termination and explicit stop use -1.
 #if defined(LC_WINDOWS)
-static volatile LONG alreadyTerminated;
+static volatile LONG terminationErrorCode;
 #else
-static volatile int alreadyTerminated;
+static volatile int terminationErrorCode;
 #endif
 static PLT_THREAD terminationCallbackThread;
 static int terminationCallbackErrorCode;
@@ -72,7 +74,11 @@ void LiInterruptConnection(void) {
 // Stop the connection by undoing the step at the current stage and those before it
 void LiStopConnection(void) {
     // Disable termination callbacks now
-    alreadyTerminated = true;
+#if defined(LC_WINDOWS)
+    InterlockedExchange(&terminationErrorCode, -1);
+#else
+    __atomic_store_n(&terminationErrorCode, -1, __ATOMIC_RELEASE);
+#endif
 
     // Set the interrupted flag
     LiInterruptConnection();
@@ -163,17 +169,20 @@ static void ClInternalConnectionTerminated(int errorCode)
 {
     int err;
 
-    // Avoid recursion and issuing multiple callbacks. Two streams can report
-    // termination in the same instant, so the check-and-set is atomic.
+    // Claim termination and publish the startup error together. A separate error
+    // write after a boolean claim lets the connection thread read an old session's
+    // error while this thread is preempted. Only the first reporting stream wins.
     if (ConnectionInterrupted) {
         return;
     }
 #if defined(LC_WINDOWS)
-    if (InterlockedExchange(&alreadyTerminated, 1) != 0) {
+    if (InterlockedCompareExchange(&terminationErrorCode, errorCode != 0 ? errorCode : -1, 0) != 0) {
         return;
     }
 #else
-    if (__atomic_exchange_n(&alreadyTerminated, 1, __ATOMIC_ACQ_REL) != 0) {
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&terminationErrorCode, &expected, errorCode != 0 ? errorCode : -1,
+                                     false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         return;
     }
 #endif
@@ -195,15 +204,14 @@ static void ClInternalConnectionTerminated(int errorCode)
     PltDetachThread(&terminationCallbackThread);
 }
 
-// Whether a started stage has already reported termination (the app has had its
-// connectionTerminated callback). Read by the connection thread between the start
-// stages so a session the host ended during startup is not reported as started.
-static bool connectionAlreadyTerminated(void)
+// The reporting stream's error is already available when its claim is visible.
+// A graceful termination is still a failed startup, so it is represented as -1.
+static int connectionTerminationError(void)
 {
 #if defined(LC_WINDOWS)
-    return InterlockedCompareExchange(&alreadyTerminated, 0, 0) != 0;
+    return InterlockedCompareExchange(&terminationErrorCode, 0, 0);
 #else
-    return __atomic_load_n(&alreadyTerminated, __ATOMIC_ACQUIRE) != 0;
+    return __atomic_load_n(&terminationErrorCode, __ATOMIC_ACQUIRE);
 #endif
 }
 
@@ -307,7 +315,11 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
         Limelog("RTSP port: %u\n", RtspPortNumber);
     }
 
-    alreadyTerminated = false;
+#if defined(LC_WINDOWS)
+    InterlockedExchange(&terminationErrorCode, 0);
+#else
+    __atomic_store_n(&terminationErrorCode, 0, __ATOMIC_RELEASE);
+#endif
     ConnectionInterrupted = false;
     
     // Validate the audio configuration
@@ -531,11 +543,10 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     LC_ASSERT(stage == STAGE_CONTROL_STREAM_START);
     ListenerCallbacks.stageComplete(STAGE_CONTROL_STREAM_START);
     Limelog("done\n");
-    if (connectionAlreadyTerminated()) {
-        // A started stage already reported termination; the app has had its callback,
-        // so no stageFailed is raised. Unwind with the stored code.
+    if ((err = connectionTerminationError()) != 0) {
+        // A started stage claimed termination and will issue the app callback.
+        // Do not also report stageFailed; unwind with the atomically published code.
         Limelog("Connection terminated by the host during startup\n");
-        err = terminationCallbackErrorCode != 0 ? terminationCallbackErrorCode : -1;
         goto Cleanup;
     }
 
@@ -551,11 +562,10 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     LC_ASSERT(stage == STAGE_VIDEO_STREAM_START);
     ListenerCallbacks.stageComplete(STAGE_VIDEO_STREAM_START);
     Limelog("done\n");
-    if (connectionAlreadyTerminated()) {
-        // A started stage already reported termination; the app has had its callback,
-        // so no stageFailed is raised. Unwind with the stored code.
+    if ((err = connectionTerminationError()) != 0) {
+        // A started stage claimed termination and will issue the app callback.
+        // Do not also report stageFailed; unwind with the atomically published code.
         Limelog("Connection terminated by the host during startup\n");
-        err = terminationCallbackErrorCode != 0 ? terminationCallbackErrorCode : -1;
         goto Cleanup;
     }
 
@@ -571,11 +581,10 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     LC_ASSERT(stage == STAGE_AUDIO_STREAM_START);
     ListenerCallbacks.stageComplete(STAGE_AUDIO_STREAM_START);
     Limelog("done\n");
-    if (connectionAlreadyTerminated()) {
-        // A started stage already reported termination; the app has had its callback,
-        // so no stageFailed is raised. Unwind with the stored code.
+    if ((err = connectionTerminationError()) != 0) {
+        // A started stage claimed termination and will issue the app callback.
+        // Do not also report stageFailed; unwind with the atomically published code.
         Limelog("Connection terminated by the host during startup\n");
-        err = terminationCallbackErrorCode != 0 ? terminationCallbackErrorCode : -1;
         goto Cleanup;
     }
 
@@ -598,10 +607,9 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     LiSendMouseMoveEvent(-1, -1);
     PltSleepMs(10);
 
-    if (connectionAlreadyTerminated()) {
+    if ((err = connectionTerminationError()) != 0) {
         // connectionStarted() must not follow connectionTerminated().
         Limelog("Connection terminated by the host during startup\n");
-        err = terminationCallbackErrorCode != 0 ? terminationCallbackErrorCode : -1;
         goto Cleanup;
     }
 
