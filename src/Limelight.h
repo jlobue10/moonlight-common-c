@@ -413,15 +413,20 @@ typedef void(*ConnListenerStageStarting)(int stage);
 typedef void(*ConnListenerStageComplete)(int stage);
 
 // This callback is invoked to indicate that a stage of initialization has failed.
-// ConnListenerConnectionTerminated() will not be invoked because the connection was
-// not yet fully established. LiInterruptConnection() and LiStopConnection() may
-// result in this callback being invoked, but it is not guaranteed.
+// It is always delivered synchronously, before LiStartConnection() returns. When a
+// started stage reported a host termination during startup, this callback carries
+// that termination's error code and ConnListenerConnectionTerminated() may
+// additionally be invoked asynchronously with the same termination. LiInterruptConnection()
+// and LiStopConnection() may result in this callback being invoked, but it is not
+// guaranteed.
 typedef void(*ConnListenerStageFailed)(int stage, int errorCode);
 
 // This callback is invoked after the connection is successfully established
 typedef void(*ConnListenerConnectionStarted)(void);
 
-// This callback is invoked when a connection is terminated after establishment.
+// This callback is invoked when a connection is terminated after establishment,
+// and may also be invoked (asynchronously, in addition to ConnListenerStageFailed)
+// for a termination that a started stage reported during startup.
 // The errorCode will be 0 if the termination was reported to be intentional
 // from the server (for example, the user closed the game). If errorCode is
 // non-zero, it means the termination was probably unexpected (loss of network,

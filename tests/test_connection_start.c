@@ -71,7 +71,14 @@ static bool observedCompareExchange(volatile int* ptr, int* expected, int value,
 #include <stdio.h>
 
 static int terminateDuringControlStart, controlTerminationCode = -7, startsVideo, startsAudio, startsInput, stops, destroys;
-static int stagesStarting, stagesFailed, started, terminations, lastTermination;
+static int stagesStarting, stagesFailed, started, terminations, lastTermination, lastFailedStage;
+// C32-03: which later position reports a termination (0 none, 1 video, 2 audio, 3 input, 4 wiggle).
+static int terminateDuringPosition, positionTerminationCode;
+static void terminateAt(int position) {
+    if (terminateDuringPosition == position) {
+        ListenerCallbacks.connectionTerminated(positionTerminationCode);
+    }
+}
 static bool callbackReceived;
 
 int testResolve(const char* host, int family, int tcpTestPort, struct sockaddr_storage* addr, SOCKADDR_LEN* addrLen) {
@@ -117,9 +124,9 @@ int testStartControl(void) {
     }
     return 0;
 }
-int testStartVideo(void* rendererContext, int drFlags) { (void)rendererContext; (void)drFlags; ++startsVideo; return 0; }
-int testStartAudio(void* audioContext, int arFlags) { (void)audioContext; (void)arFlags; ++startsAudio; return 0; }
-int testStartInput(void) { ++startsInput; return 0; }
+int testStartVideo(void* rendererContext, int drFlags) { (void)rendererContext; (void)drFlags; ++startsVideo; terminateAt(1); return 0; }
+int testStartAudio(void* audioContext, int arFlags) { (void)audioContext; (void)arFlags; ++startsAudio; terminateAt(2); return 0; }
+int testStartInput(void) { ++startsInput; terminateAt(3); return 0; }
 int testStopControl(void) {
     ++stops;
     if (asyncTermination) {
@@ -138,11 +145,11 @@ void testDestroyControl(void) { ++destroys; }
 void testDestroyVideo(void) { ++destroys; }
 void testDestroyAudio(void) { ++destroys; }
 void testDestroyInput(void) { ++destroys; }
-int testMouseMove(short deltaX, short deltaY) { (void)deltaX; (void)deltaY; return 0; }
+int testMouseMove(short deltaX, short deltaY) { (void)deltaX; (void)deltaY; terminateAt(4); terminateDuringPosition = 0; return 0; }
 
 static void stubStageStarting(int s) { (void)s; ++stagesStarting; }
 static void stubStageComplete(int s) { (void)s; }
-static void stubStageFailed(int s, int code) { (void)s; (void)code; ++stagesFailed; }
+static void stubStageFailed(int s, int code) { (void)code; ++stagesFailed; lastFailedStage = s; }
 static void stubStarted(void) { ++started; }
 static void stubTerminated(int code) {
     pthread_mutex_lock(&claimMutex);
@@ -189,6 +196,7 @@ static int start(int packetSize) {
 
 int main(void) {
     int ret;
+    setvbuf(stdout, NULL, _IONBF, 0);  // progress survives an abort() in a timed-out wait
 
     ret = start(1024);
     check(ret == 0 && started == 1 && startsVideo == 1 && startsAudio == 1 && startsInput == 1 && terminations == 0,
@@ -203,7 +211,8 @@ int main(void) {
     check(ret == -7, "a termination during the control stream start fails LiStartConnection() with the reported code");
     check(started == 0, "connectionStarted() never follows connectionTerminated()");
     check(startsVideo == 0 && startsAudio == 0 && startsInput == 0, "no later stage starts for a session the host already ended");
-    check(stagesFailed == 0 && terminations == 1 && lastTermination == -7, "the app receives exactly one terminated callback and no stageFailed");
+    check(stagesFailed == 1 && lastFailedStage == STAGE_CONTROL_STREAM_START && terminations == 1 && lastTermination == -7,
+          "the app receives stageFailed synchronously for the control stage and one terminated callback");
     check(stops == 1 && destroys == 4, "the started control stage and the initialised stages are unwound");
 
     // The previous session reported -7. A reporting thread in this one has claimed
@@ -215,8 +224,8 @@ int main(void) {
     check(ret == -19, "startup returns this session's termination code even if the reporting thread pauses after claiming it");
     check(started == 0 && startsVideo == 0 && startsAudio == 0 && startsInput == 0,
           "a claimed asynchronous termination prevents every later start stage");
-    check(terminations == 1 && lastTermination == -19 && stagesFailed == 0,
-          "the asynchronous app callback agrees with the startup error and runs once");
+    check(terminations == 1 && lastTermination == -19 && stagesFailed == 1 && lastFailedStage == STAGE_CONTROL_STREAM_START,
+          "the asynchronous app callback agrees with the startup error and runs once, next to the synchronous stageFailed");
     check(stops == 1 && destroys == 4, "asynchronous termination still unwinds all initialized stages");
 
     terminateDuringControlStart = 1;
@@ -226,6 +235,25 @@ int main(void) {
     terminateDuringControlStart = 0;
     check(ret == -1 && started == 0, "graceful termination during startup is still a failed start");
     check(terminations == 1 && lastTermination == 0, "the app callback retains the original graceful termination code");
+    check(stagesFailed == 1 && lastFailedStage == STAGE_CONTROL_STREAM_START, "a graceful termination during startup is reported as stageFailed too");
+
+    // C32-03: a termination reported during each later start stage, and between the input
+    // stage and connectionStarted() (the mouse wiggle), is caught by that position's check.
+    for (int position = 1; position <= 4; ++position) {
+        const int stageOfPosition[] = {0, STAGE_VIDEO_STREAM_START, STAGE_AUDIO_STREAM_START, STAGE_INPUT_STREAM_START, STAGE_INPUT_STREAM_START};
+        terminateDuringPosition = position;
+        positionTerminationCode = -7 - position;
+        ret = start(1024);
+        waitForCallback();
+        terminateDuringPosition = 0;
+        check(ret == -7 - position && started == 0, "a termination at a later start position fails the start with its code");
+        check(startsVideo == 1 && startsAudio == (position >= 2) && startsInput == (position >= 3),
+              "only the stages before the terminating position started");
+        check(stagesFailed == 1 && lastFailedStage == stageOfPosition[position] && terminations == 1 && lastTermination == -7 - position,
+              "stageFailed names the stage that was running when the termination was observed");
+        check(stops == 2 + (position >= 2) + (position >= 3) && destroys == 4,
+              "every started stage is unwound after a late termination");
+    }
 
     ret = start(-16);
     check(ret == -1 && stagesStarting == 0, "a negative packet size is refused before any stage starts");
