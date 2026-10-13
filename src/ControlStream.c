@@ -1615,10 +1615,10 @@ static void lossStatsThreadFunc(void* context) {
     BYTE_BUFFER byteBuffer;
 
     if (usePeriodicPing) {
-        char periodicPingPayload[8] = {0};  // 6 bytes written, 8 sent: no uninitialised tail
+        char periodicPingPayload[8] = {0};  // 32-bit length + 32-bit timestamp fill all 8 bytes
 
         BbInitializeWrappedBuffer(&byteBuffer, periodicPingPayload, 0, sizeof(periodicPingPayload), BYTE_ORDER_LITTLE);
-        BbPut16(&byteBuffer, 4); // Length of payload
+        BbPut32(&byteBuffer, 4); // Length of payload
         BbPut32(&byteBuffer, 0); // Timestamp?
 
         while (!PltIsThreadInterrupted(&lossStatsThread)) {
