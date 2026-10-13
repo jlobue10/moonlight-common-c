@@ -997,8 +997,17 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
     // 1. Video bitrate is higher than 15 Mbps (to ensure most bandwidth is reserved for video)
     // 2. The audio decoder has not declared that it is slow
     // 3. The stream is either local or not surround sound (to prevent MTU issues over the Internet)
+    //
+    // A client that asked for PyroWave carries the PyroWave bits-per-pixel budget in
+    // `bitrate`; when this server never advertised PyroWave, the session will run at the
+    // conventional fallback bitrate (applied after DESCRIBE, see below), so judge the
+    // audio bandwidth by that value rather than by a budget that will not be used (C44-01).
     LC_ASSERT(StreamConfig.streamingRemotely != STREAM_CFG_AUTO);
-    if (StreamConfig.bitrate >= HIGH_AUDIO_BITRATE_THRESHOLD &&
+    int expectedVideoBitrate = conventionalBitrateAfterPyroWave(StreamConfig.supportedVideoFormats,
+                                                                selectPyroWaveFormat(StreamConfig.supportedVideoFormats,
+                                                                                     serverInfo->serverCodecModeSupport),
+                                                                StreamConfig.bitrate, StreamConfig.pyroWaveFallbackBitrate);
+    if (expectedVideoBitrate >= HIGH_AUDIO_BITRATE_THRESHOLD &&
             (AudioCallbacks.capabilities & CAPABILITY_SLOW_OPUS_DECODER) == 0 &&
             (StreamConfig.streamingRemotely != STREAM_CFG_REMOTE || CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(StreamConfig.audioConfiguration) <= 2)) {
         // If we have an RTSP URL string and it was successfully parsed and copied, use that string
