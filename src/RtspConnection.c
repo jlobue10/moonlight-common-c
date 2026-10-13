@@ -1132,11 +1132,18 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             Limelog("PyroWave unavailable: missing, ambiguous or incompatible SDP bitstream ID (expected "
                     LI_PYROWAVE_BITSTREAM_ID "). Trying conventional codecs.\n");
             pyroWaveFormat = 0;
-            if (StreamConfig.pyroWaveFallbackBitrate > 0 && StreamConfig.bitrate != StreamConfig.pyroWaveFallbackBitrate) {
-                // The PyroWave budget (bits per pixel) is not a sensible HEVC/AV1 request.
+        }
+        // The PyroWave budget (bits per pixel) is not a sensible HEVC/AV1 request. It
+        // comes down to the configured fallback whenever PyroWave was asked for and
+        // is not what was negotiated, whether the server never advertised it at all
+        // or advertised it with an incompatible bitstream (C42-01).
+        {
+            int conventionalBitrate = conventionalBitrateAfterPyroWave(StreamConfig.supportedVideoFormats, pyroWaveFormat,
+                                                                       StreamConfig.bitrate, StreamConfig.pyroWaveFallbackBitrate);
+            if (conventionalBitrate != StreamConfig.bitrate) {
                 Limelog("Using the conventional bitrate of %d kbps instead of the PyroWave budget of %d kbps\n",
-                        StreamConfig.pyroWaveFallbackBitrate, StreamConfig.bitrate);
-                StreamConfig.bitrate = StreamConfig.pyroWaveFallbackBitrate;
+                        conventionalBitrate, StreamConfig.bitrate);
+                StreamConfig.bitrate = conventionalBitrate;
             }
         }
         if (pyroWaveFormat != 0) {
