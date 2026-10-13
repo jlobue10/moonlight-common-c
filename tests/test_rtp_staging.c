@@ -4,6 +4,7 @@
 #undef LC_DEBUG
 #include "RtpVideoQueue.c"
 #include <time.h>
+#include <assert.h>
 
 static uint32_t randomState = 0x12c0ffee;
 static uint32_t nextRandom(void) {
