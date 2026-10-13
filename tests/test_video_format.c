@@ -80,6 +80,20 @@ int main(void) {
         }
     }
     printf("PyroWave negotiation: 256 capability combinations, %d failures\n", failures);
+    {
+        // The fallback bitrate replaces the PyroWave budget whenever PyroWave was requested and
+        // not negotiated: the server never advertised it (C42-01) as much as an incompatible SDP.
+        int fallbackFailures = 0;
+        const int budget = 300000, fallback = 20000;
+        if (conventionalBitrateAfterPyroWave(VIDEO_FORMAT_H264 | VIDEO_FORMAT_PYROWAVE, 0, budget, fallback) != fallback) fallbackFailures++;
+        if (conventionalBitrateAfterPyroWave(VIDEO_FORMAT_PYROWAVE_HDR10_444, 0, budget, fallback) != fallback) fallbackFailures++;
+        if (conventionalBitrateAfterPyroWave(VIDEO_FORMAT_H264 | VIDEO_FORMAT_PYROWAVE, VIDEO_FORMAT_PYROWAVE, budget, fallback) != budget) fallbackFailures++;
+        if (conventionalBitrateAfterPyroWave(VIDEO_FORMAT_H264 | VIDEO_FORMAT_H265, 0, budget, fallback) != budget) fallbackFailures++;
+        if (conventionalBitrateAfterPyroWave(VIDEO_FORMAT_H264 | VIDEO_FORMAT_PYROWAVE, 0, budget, 0) != budget) fallbackFailures++;
+        if (conventionalBitrateAfterPyroWave(VIDEO_FORMAT_H264 | VIDEO_FORMAT_PYROWAVE, 0, fallback, fallback) != fallback) fallbackFailures++;
+        printf("PyroWave fallback bitrate: 6 cases, %d failures\n", fallbackFailures);
+        failures += fallbackFailures;
+    }
     failures += testSdp();
     return failures != 0;
 }

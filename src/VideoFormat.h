@@ -47,6 +47,19 @@ static inline int hasCompatiblePyroWaveSdp(const char* sdp, size_t length) {
     return revisionFound && mediaFound;
 }
 
+// The bitrate a connection that asked for PyroWave should request once PyroWave is
+// off the table (not advertised by the server, or advertised with an incompatible
+// bitstream): the PyroWave budget is bits per pixel, far above any conventional
+// codec's request, so the configured fallback takes its place. `bitrate` is kept
+// when PyroWave was negotiated, never requested, or no fallback is configured.
+static inline int conventionalBitrateAfterPyroWave(int clientFormats, int negotiatedPyroWaveFormat,
+                                                   int bitrate, int fallbackBitrate) {
+    if (negotiatedPyroWaveFormat != 0) return bitrate;
+    if (!(clientFormats & VIDEO_FORMAT_MASK_PYROWAVE)) return bitrate;
+    if (fallbackBitrate <= 0) return bitrate;
+    return fallbackBitrate;
+}
+
 // Zero means there is no mutually supported PyroWave profile. Keep the server's
 // base capability requirement, but never infer support for an unoffered profile.
 static inline int selectPyroWaveFormat(int clientFormats, int serverModes) {
