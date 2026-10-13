@@ -544,9 +544,14 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     ListenerCallbacks.stageComplete(STAGE_CONTROL_STREAM_START);
     Limelog("done\n");
     if ((err = connectionTerminationError()) != 0) {
-        // A started stage claimed termination and will issue the app callback.
-        // Do not also report stageFailed; unwind with the atomically published code.
-        Limelog("Connection terminated by the host during startup\n");
+        // A started stage claimed termination and will issue the asynchronous
+        // connectionTerminated() callback, but a failed start must always be
+        // reported synchronously: the caller tears its listener down as soon as
+        // LiStartConnection() returns non-zero, so the asynchronous callback may
+        // never be seen. The app de-duplicates the pair, as it did before the
+        // startup checks existed.
+        Limelog("Connection terminated by the host during startup: %d\n", err);
+        ListenerCallbacks.stageFailed(stage, err);
         goto Cleanup;
     }
 
@@ -563,9 +568,14 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     ListenerCallbacks.stageComplete(STAGE_VIDEO_STREAM_START);
     Limelog("done\n");
     if ((err = connectionTerminationError()) != 0) {
-        // A started stage claimed termination and will issue the app callback.
-        // Do not also report stageFailed; unwind with the atomically published code.
-        Limelog("Connection terminated by the host during startup\n");
+        // A started stage claimed termination and will issue the asynchronous
+        // connectionTerminated() callback, but a failed start must always be
+        // reported synchronously: the caller tears its listener down as soon as
+        // LiStartConnection() returns non-zero, so the asynchronous callback may
+        // never be seen. The app de-duplicates the pair, as it did before the
+        // startup checks existed.
+        Limelog("Connection terminated by the host during startup: %d\n", err);
+        ListenerCallbacks.stageFailed(stage, err);
         goto Cleanup;
     }
 
@@ -582,9 +592,14 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     ListenerCallbacks.stageComplete(STAGE_AUDIO_STREAM_START);
     Limelog("done\n");
     if ((err = connectionTerminationError()) != 0) {
-        // A started stage claimed termination and will issue the app callback.
-        // Do not also report stageFailed; unwind with the atomically published code.
-        Limelog("Connection terminated by the host during startup\n");
+        // A started stage claimed termination and will issue the asynchronous
+        // connectionTerminated() callback, but a failed start must always be
+        // reported synchronously: the caller tears its listener down as soon as
+        // LiStartConnection() returns non-zero, so the asynchronous callback may
+        // never be seen. The app de-duplicates the pair, as it did before the
+        // startup checks existed.
+        Limelog("Connection terminated by the host during startup: %d\n", err);
+        ListenerCallbacks.stageFailed(stage, err);
         goto Cleanup;
     }
 
@@ -608,8 +623,10 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     PltSleepMs(10);
 
     if ((err = connectionTerminationError()) != 0) {
-        // connectionStarted() must not follow connectionTerminated().
-        Limelog("Connection terminated by the host during startup\n");
+        // connectionStarted() must not follow connectionTerminated(); the failed
+        // start is reported synchronously for the same reason as above.
+        Limelog("Connection terminated by the host during startup: %d\n", err);
+        ListenerCallbacks.stageFailed(stage, err);
         goto Cleanup;
     }
 
