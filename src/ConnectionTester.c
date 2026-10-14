@@ -80,6 +80,12 @@ unsigned short LiGetPortFromPortFlagIndex(int portFlagIndex)
 
 void LiStringifyPortFlags(unsigned int portFlags, const char* separator, char* outputBuffer, int outputBufferLength)
 {
+    // Even the initial terminator requires space. In particular, a negative
+    // length must not become a very large size_t when passed to snprintf().
+    if (outputBufferLength <= 0) {
+        return;
+    }
+
     // Only the defined ports can be named (ML_PORT_FLAG_ALL and stale bits would otherwise
     // reach LiGetPortFromPortFlagIndex's assert / "TCP 0").
     portFlags &= VALID_PORT_FLAG_MASK;

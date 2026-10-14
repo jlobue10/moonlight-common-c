@@ -1028,6 +1028,7 @@ unsigned short LiGetPortFromPortFlagIndex(int portFlagIndex);
 // Populates the output buffer with a stringified list of the port flags set in the input argument.
 // The second and subsequent entries will be prepended by 'separator' (if provided).
 // If the output buffer is too small, the output will be truncated to fit the provided buffer.
+// A non-positive buffer length performs no writes; outputBuffer may be NULL in that case.
 void LiStringifyPortFlags(unsigned int portFlags, const char* separator, char* outputBuffer, int outputBufferLength);
 
 // This function may be used to test if the local network is blocking Moonlight's ports. It requires
