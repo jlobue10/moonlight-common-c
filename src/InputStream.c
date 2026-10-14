@@ -1077,13 +1077,17 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
     }
 
     if (!holder) {
-        // Because we're not using the currently queued packet, it's safe
-        // to unlock here without having to worry about the input thread
-        // touching our packet holder behind our back.
-        PltUnlockMutex(&batchedInputMutex);
-
+        // Allocate while still holding the batched input mutex. Unlocking around the
+        // allocation let a second producer for the same controller (a driver thread's
+        // last state against the main thread's zero state on removal, for instance)
+        // allocate, publish and enqueue a NEWER holder in that window; this older state
+        // was then published as current and sent after it, so the host applied the two
+        // in the wrong order and could be left with a stuck button (C46-01). The motion
+        // path already allocates under this mutex; the free list has its own lock and
+        // nothing takes this mutex while holding that one.
         holder = allocatePacketHolder(0);
         if (holder == NULL) {
+            PltUnlockMutex(&batchedInputMutex);
             return -1;
         }
 
@@ -1095,11 +1099,6 @@ static int sendControllerEventInternal(short controllerNumber, short activeGamep
 
         // Remember that we need to enqueue this holder since it's new
         enqueueHolder = true;
-
-        // Reacquire the batched input mutex before making it visible to
-        // the input thread by storing this in the input queue or in the
-        // currentQueuedControllerPacket array.
-        PltLockMutex(&batchedInputMutex);
     }
 
     if (AppVersionQuad[0] == 3) {
