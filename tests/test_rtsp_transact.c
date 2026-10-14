@@ -202,6 +202,18 @@ int main(void) {
           "a fallback bitrate above the threshold keeps high-quality audio");
     check(closes == 1, "the DESCRIBE socket is closed once");
 
+    // Upstream 5ec8397 + C14-01: a repeated option on a request replaces the earlier node's
+    // allocated fields and frees the duplicate node (LeakSanitizer bites on either leak).
+    {
+        RTSP_MESSAGE request;
+        createRtspRequest(&request, NULL, 0, "OPTIONS", "rtsp://127.0.0.1", "RTSP/1.0", 1, NULL, NULL, 0);
+        check(addOption(&request, "X-Test", "one") && addOption(&request, "X-Test", "two") &&
+              request.options != NULL && request.options->next == NULL &&
+              strcmp(request.options->option, "X-Test") == 0 && strcmp(request.options->content, "two") == 0,
+              "a repeated request option keeps one node carrying the later content");
+        freeMessage(&request);
+    }
+
     // C33-02: over ENet the payload packet is awaited only behind a 200 reply.
     check(carriesPayload("RTSP/1.0 200 OK\r\nCSeq: 2\r\n\r\n"), "a 200 reply header is followed by a payload packet");
     check(!carriesPayload("RTSP/1.0 400 Bad Request\r\nCSeq: 2\r\n\r\n"), "an error reply header is not waited on for a payload");
