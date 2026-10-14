@@ -310,11 +310,28 @@ bool insertOption(POPTION_ITEM* optionsHead, POPTION_ITEM opt) {
 
     // Traverse the list and insert the new option at the end
     while (current != NULL) {
+        // Check for self-insertion: the node is already linked, nothing to do
+        // (and the caller must not free it).
+        if (current == opt) {
+            LC_ASSERT(current != opt);
+            return true;
+        }
+
         // Check for duplicate option; if so, replace the option currently there.
-        // The caller keeps ownership of `opt` (it leaked one node per duplicate
+        // The earlier node takes the new node's fields (and releases its own if
+        // it allocated them, upstream 5ec8397); the caller keeps ownership of the
+        // `opt` node itself and frees it (C14-01: it leaked one node per duplicate
         // header of a host response before).
         if (!strcmp(current->option, opt->option)) {
+            if (current->flags & FLAG_ALLOCATED_OPTION_FIELDS) {
+                free(current->option);
+                free(current->content);
+            }
+            current->option = opt->option;
             current->content = opt->content;
+            current->flags = opt->flags;
+            // The fields now belong to the list node; the caller frees only `opt`.
+            opt->flags &= ~FLAG_ALLOCATED_OPTION_FIELDS;
             return false;
         }
         if (current->next == NULL) {

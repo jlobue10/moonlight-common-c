@@ -63,7 +63,10 @@ static bool addOption(PRTSP_MESSAGE msg, char* option, char* content)
         return false;
     }
 
-    insertOption(&msg->options, item);
+    if (!insertOption(&msg->options, item)) {
+        // Duplicate option: the earlier node took the fields, only the node is left.
+        free(item);
+    }
     msg->flags |= FLAG_ALLOCATED_OPTION_ITEMS;
 
     return true;
