@@ -88,6 +88,12 @@ typedef struct _QUEUED_ASYNC_CALLBACK {
             uint8_t length;
             uint8_t report[STEAM_HAPTIC_REPORT_MAX];
         } steamHaptic;
+        struct {
+            uint16_t controllerNumber;
+            uint8_t command;
+            uint8_t count;
+            uint8_t triples[STEAM_SETTINGS_PAYLOAD_SIZE];
+        } steamSettings;
     } data;
     LINKED_BLOCKING_QUEUE_ENTRY entry;
 } QUEUED_ASYNC_CALLBACK, *PQUEUED_ASYNC_CALLBACK;
@@ -248,6 +254,7 @@ static PPLT_CRYPTO_CONTEXT decryptionCtx;
 #define IDX_FILE_TRANSFER_NONCE_REQUEST 14
 #define IDX_DS_ADAPTIVE_TRIGGERS 15
 #define IDX_STEAM_HAPTIC 16
+#define IDX_STEAM_SETTINGS 17
 
 #define CONTROL_STREAM_TIMEOUT_SEC 10
 #define CONTROL_STREAM_LINGER_TIMEOUT_SEC 2
@@ -270,6 +277,7 @@ static const short packetTypesGen3[] = {
     -1,     // File transfer nonce request (unused)
     -1,     // Set Adaptive Triggers (unused)
     -1,     // Steam Controller haptic report (unused)
+    -1,     // Steam Controller settings write (unused)
 };
 static const short packetTypesGen4[] = {
     0x0606, // Request IDR frame
@@ -289,6 +297,7 @@ static const short packetTypesGen4[] = {
     -1,     // File transfer nonce request (unused)
     -1,     // Set Adaptive Triggers (unused)
     -1,     // Steam Controller haptic report (unused)
+    -1,     // Steam Controller settings write (unused)
 };
 static const short packetTypesGen5[] = {
     0x0305, // Start A
@@ -308,6 +317,7 @@ static const short packetTypesGen5[] = {
     -1,     // File transfer nonce request (unused)
     -1,     // Set Adaptive Triggers (unused)
     -1,     // Steam Controller haptic report (unused)
+    -1,     // Steam Controller settings write (unused)
 };
 static const short packetTypesGen7[] = {
     0x0305, // Start A
@@ -327,6 +337,7 @@ static const short packetTypesGen7[] = {
     -1,     // File transfer nonce request (unused)
     -1,     // Set Adaptive Triggers (unused)
     -1,     // Steam Controller haptic report (unused)
+    -1,     // Steam Controller settings write (unused)
 };
 static const short packetTypesGen7Enc[] = {
     0x0302, // Request IDR frame
@@ -346,6 +357,7 @@ static const short packetTypesGen7Enc[] = {
     0x3002, // File transfer nonce request (Apollo protocol extension)
     0x5503, // Set Adaptive Triggers (Sunshine protocol extension)
     0x5504, // Steam Controller haptic report (Vibepollo protocol extension)
+    0x5505, // Steam Controller settings write (Vibepollo protocol extension)
 };
 
 static const char requestIdrFrameGen3[] = { 0, 0 };
@@ -1152,6 +1164,14 @@ static void asyncCallbackThreadFunc(void* context) {
                                           queuedCb->data.steamHaptic.length,
                                           queuedCb->data.steamHaptic.report);
             break;
+        case IDX_STEAM_SETTINGS:
+            // Settings writes are events delivered whole and in order: a chunk of a
+            // longer write must not replace or outrun its siblings.
+            ListenerCallbacks.steamSettings(queuedCb->data.steamSettings.controllerNumber,
+                                            queuedCb->data.steamSettings.command,
+                                            queuedCb->data.steamSettings.count,
+                                            queuedCb->data.steamSettings.triples);
+            break;
         default:
             // Unhandled packet type from queueAsyncCallback()
             LC_ASSERT(false);
@@ -1169,7 +1189,8 @@ static bool needsAsyncCallback(unsigned short packetType) {
            packetType == packetTypes[IDX_SET_RGB_LED] ||
            packetType == packetTypes[IDX_HDR_INFO] ||
            packetType == packetTypes[IDX_DS_ADAPTIVE_TRIGGERS] ||
-           packetType == packetTypes[IDX_STEAM_HAPTIC];
+           packetType == packetTypes[IDX_STEAM_HAPTIC] ||
+           packetType == packetTypes[IDX_STEAM_SETTINGS];
 }
 
 // Return a stop key including both report family and actuator mask.
@@ -1212,6 +1233,7 @@ static uint32_t asyncCallbackStateKey(void* value) {
         if (subkey == 0) return 0;
         break;
     case IDX_HDR_INFO: break;
+    case IDX_STEAM_SETTINGS: return 0;  // never coalesced: each chunk carries distinct ids
     default: return 0;
     }
     if (controller >= 16) return 0;
@@ -1358,6 +1380,24 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
             return;
         }
         queuedCb->typeIndex = IDX_STEAM_HAPTIC;
+    }
+    else if (ctlHdr->type == packetTypes[IDX_STEAM_SETTINGS]) {
+        // Fixed-size wire format: controller, command, count, then the full triple
+        // array. A short packet, an unknown command, or a count the command or the
+        // array cannot carry is dropped rather than applied in part.
+        if (!BbGet16(&bb, &queuedCb->data.steamSettings.controllerNumber) ||
+                !BbGet8(&bb, &queuedCb->data.steamSettings.command) ||
+                !BbGet8(&bb, &queuedCb->data.steamSettings.count) ||
+                !BbGetBytes(&bb, queuedCb->data.steamSettings.triples, STEAM_SETTINGS_PAYLOAD_SIZE) ||
+                queuedCb->data.steamSettings.count > STEAM_SETTINGS_TRIPLES_MAX ||
+                (queuedCb->data.steamSettings.command == STEAM_SETTINGS_SET_VALUES
+                    ? queuedCb->data.steamSettings.count == 0
+                    : queuedCb->data.steamSettings.command != STEAM_SETTINGS_LOAD_DEFAULTS ||
+                      queuedCb->data.steamSettings.count != 0)) {
+            free(queuedCb);
+            return;
+        }
+        queuedCb->typeIndex = IDX_STEAM_SETTINGS;
     }
     else {
         // Unhandled packet type from needsAsyncCallback()

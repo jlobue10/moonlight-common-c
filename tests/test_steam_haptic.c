@@ -28,6 +28,8 @@ int main(void) {
         NVCTL_ENET_PACKET_HEADER_V1 header;
         unsigned char bytes[sizeof(NVCTL_ENET_PACKET_HEADER_V1) + 3 + STEAM_HAPTIC_REPORT_MAX];
     } packet = {0};
+    // A union's {0} initializer only covers its first member; the rest is unspecified.
+    memset(&packet, 0, sizeof(packet));
     packetTypes = (short*)packetTypesGen7Enc;
     packet.header.type = packetTypes[IDX_STEAM_HAPTIC];
     packet.bytes[2] = 7;
