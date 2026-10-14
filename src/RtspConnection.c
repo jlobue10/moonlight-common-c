@@ -245,6 +245,22 @@ static bool unsealRtspMessage(char* rawMessage, int rawMessageLen, PRTSP_MESSAGE
 }
 
 // Send RTSP message and get response over ENet
+// The SDP payload rides in a second ENet packet only behind a 200 reply: an error reply
+// has no body, and waiting for one costs the whole receive timeout and loses the status
+// code (C33-02). A header packet that does not parse on its own takes the old path.
+static bool enetReplyCarriesPayload(char* headerPacket, int length) {
+    RTSP_MESSAGE header;
+    bool carries = false;
+    if (parseRtspMessage(&header, headerPacket, length) == RTSP_ERROR_SUCCESS) {
+        carries = header.type == TYPE_RESPONSE && header.message.response.statusCode == 200;
+        freeMessage(&header);
+    }
+    else {
+        carries = true;
+    }
+    return carries;
+}
+
 static bool transactRtspMessageEnet(PRTSP_MESSAGE request, PRTSP_MESSAGE response, bool expectingPayload, int* error) {
     ENetEvent event;
     char* serializedMessage;
@@ -330,8 +346,8 @@ static bool transactRtspMessageEnet(PRTSP_MESSAGE request, PRTSP_MESSAGE respons
     offset = (int) event.packet->dataLength;
     enet_packet_destroy(event.packet);
 
-    // Wait for the payload if we're expecting some
-    if (expectingPayload) {
+    // Wait for the payload if we're expecting some and the reply can carry one
+    if (expectingPayload && enetReplyCarriesPayload(responseBuffer, offset)) {
         // The payload comes in a second packet
         if (serviceEnetHost(client, &event, RTSP_RECEIVE_TIMEOUT_SEC * 1000) <= 0 ||
             event.type != ENET_EVENT_TYPE_RECEIVE) {
@@ -973,6 +989,125 @@ static bool rtspOverEnet(const int* appVersionQuad, bool encryptedRtsp) {
 }
 
 // Perform RTSP Handshake with the streaming server machine as part of the connection process
+// Picks the RTSP target URL (and the Host header every request derives from it) for the
+// video bitrate the session will request: the host's own address asks for high-quality
+// audio, 0.0.0.0 asks for normal quality (see the HACK note in performRtspHandshake).
+// Called before OPTIONS with the predicted bitrate and again after DESCRIBE once the
+// PyroWave negotiation has settled the bitrate for real (C33-01).
+static void selectRtspTargetUrl(PSERVER_INFORMATION serverInfo, int videoBitrateKbps) {
+    if (videoBitrateKbps >= HIGH_AUDIO_BITRATE_THRESHOLD &&
+            (AudioCallbacks.capabilities & CAPABILITY_SLOW_OPUS_DECODER) == 0 &&
+            (StreamConfig.streamingRemotely != STREAM_CFG_REMOTE || CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(StreamConfig.audioConfiguration) <= 2)) {
+        // If we have an RTSP URL string and it was successfully parsed and copied, use that string
+        if (serverInfo->rtspSessionUrl == NULL ||
+                !parseUrlAddrFromRtspUrlString(serverInfo->rtspSessionUrl, urlAddr, sizeof(urlAddr)) ||
+                !PltSafeStrcpy(rtspTargetUrl, sizeof(rtspTargetUrl), serverInfo->rtspSessionUrl)) {
+            // If an RTSP URL string was not provided or failed to parse, we will construct one now as best we can.
+            //
+            // NB: If the remote address is not a LAN address, the host will likely not enable high quality
+            // audio since it only does that for local streaming normally. We can avoid this limitation,
+            // but only if the caller gave us the RTSP session URL that it received from the host during launch.
+            addrToUrlSafeString(&RemoteAddr, urlAddr, sizeof(urlAddr));
+            snprintf(rtspTargetUrl, sizeof(rtspTargetUrl), "rtsp%s://%s:%u", useEnet ? "ru" : "", urlAddr, RtspPortNumber);
+        }
+    }
+    else {
+        PltSafeStrcpy(urlAddr, sizeof(urlAddr), "0.0.0.0");
+        snprintf(rtspTargetUrl, sizeof(rtspTargetUrl), "rtsp%s://%s:%u", useEnet ? "ru" : "", urlAddr, RtspPortNumber);
+    }
+}
+
+// Settles the video format and the bitrate from the DESCRIBE reply: PyroWave only when
+// the client asked for it and the server advertised it with a compatible bitstream,
+// otherwise the conventional codec chain at the fallback bitrate (C42-01). Returns the
+// VIDEO_FORMAT_* the stream will use; kept apart from performRtspHandshake so a harness
+// can drive it with a scripted reply (C33-03).
+static int negotiateVideoFormat(PSERVER_INFORMATION serverInfo, PRTSP_MESSAGE response) {
+    int format;
+
+    // PyroWave is selected only when the client asked for it and the server both
+    // advertises SCM_PYROWAVE, offers the PYROWAVE media type, and declares
+    // the bitstream revision understood by the client decoder.
+    int pyroWaveFormat = selectPyroWaveFormat(StreamConfig.supportedVideoFormats,
+                                              serverInfo->serverCodecModeSupport);
+    if (pyroWaveFormat != 0 && (response->payloadLength <= 0 ||
+        !hasCompatiblePyroWaveSdp(response->payload, (size_t)response->payloadLength))) {
+        Limelog("PyroWave unavailable: missing, ambiguous or incompatible SDP bitstream ID (expected "
+                LI_PYROWAVE_BITSTREAM_ID "). Trying conventional codecs.\n");
+        pyroWaveFormat = 0;
+    }
+    // The PyroWave budget (bits per pixel) is not a sensible HEVC/AV1 request. It
+    // comes down to the configured fallback whenever PyroWave was asked for and
+    // is not what was negotiated, whether the server never advertised it at all
+    // or advertised it with an incompatible bitstream (C42-01).
+    {
+        int conventionalBitrate = conventionalBitrateAfterPyroWave(StreamConfig.supportedVideoFormats, pyroWaveFormat,
+                                                                   StreamConfig.bitrate, StreamConfig.pyroWaveFallbackBitrate);
+        if (conventionalBitrate != StreamConfig.bitrate) {
+            Limelog("Using the conventional bitrate of %d kbps instead of the PyroWave budget of %d kbps\n",
+                    conventionalBitrate, StreamConfig.bitrate);
+            StreamConfig.bitrate = conventionalBitrate;
+            // The audio-quality choice behind the Host header was predicted before DESCRIBE from
+            // the capability bits alone; an advertised-but-incompatible PyroWave bitstream lands
+            // here with the fallback bitrate, so choose again for the value the session will use
+            // (Vibepollo reads the Host header of the ANNOUNCE) (C33-01).
+            selectRtspTargetUrl(serverInfo, StreamConfig.bitrate);
+        }
+    }
+    if (pyroWaveFormat != 0) {
+        format = pyroWaveFormat;
+    }
+    else if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1) && strstr(response->payload, "AV1/90000")) {
+        if ((serverInfo->serverCodecModeSupport & SCM_AV1_HIGH10_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH10_444)) {
+            format = VIDEO_FORMAT_AV1_HIGH10_444;
+        }
+        else if ((serverInfo->serverCodecModeSupport & SCM_AV1_MAIN10) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_MAIN10)) {
+            format = VIDEO_FORMAT_AV1_MAIN10;
+        }
+        else if ((serverInfo->serverCodecModeSupport & SCM_AV1_HIGH8_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH8_444)) {
+            format = VIDEO_FORMAT_AV1_HIGH8_444;
+        }
+        else {
+            format = VIDEO_FORMAT_AV1_MAIN8;
+        }
+    }
+    else if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_H265) && strstr(response->payload, "sprop-parameter-sets=AAAAAU")) {
+        // The RTSP DESCRIBE reply will contain a collection of SDP media attributes that
+        // describe the various supported video stream formats and include the SPS, PPS,
+        // and VPS (if applicable). We will use this information to determine whether the
+        // server can support HEVC. For some reason, they still set the MIME type of the HEVC
+        // format to H264, so we can't just look for the HEVC MIME type. What we'll do instead is
+        // look for the base 64 encoded VPS NALU prefix that is unique to the HEVC bitstream.
+        if ((serverInfo->serverCodecModeSupport & SCM_HEVC_REXT10_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_REXT10_444)) {
+            format = VIDEO_FORMAT_H265_REXT10_444;
+        }
+        else if ((serverInfo->serverCodecModeSupport & SCM_HEVC_MAIN10) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_MAIN10)) {
+            format = VIDEO_FORMAT_H265_MAIN10;
+        }
+        else if ((serverInfo->serverCodecModeSupport & SCM_HEVC_REXT8_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_REXT8_444)) {
+            format = VIDEO_FORMAT_H265_REXT8_444;
+        }
+        else {
+            format = VIDEO_FORMAT_H265;
+        }
+    }
+    else {
+        if ((serverInfo->serverCodecModeSupport & SCM_H264_HIGH8_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H264_HIGH8_444)) {
+            format = VIDEO_FORMAT_H264_HIGH8_444;
+        }
+        else {
+            format = VIDEO_FORMAT_H264;
+        }
+
+        // Dimensions over 4096 are only supported with HEVC on NVENC
+        if (StreamConfig.width > 4096 || StreamConfig.height > 4096) {
+            Limelog("WARNING: Host PC doesn't support HEVC. Streaming at resolutions above 4K using H.264 will likely fail!\n");
+        }
+    }
+
+    return format;
+}
+
 int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
     int ret;
 
@@ -1007,26 +1142,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
                                                                 selectPyroWaveFormat(StreamConfig.supportedVideoFormats,
                                                                                      serverInfo->serverCodecModeSupport),
                                                                 StreamConfig.bitrate, StreamConfig.pyroWaveFallbackBitrate);
-    if (expectedVideoBitrate >= HIGH_AUDIO_BITRATE_THRESHOLD &&
-            (AudioCallbacks.capabilities & CAPABILITY_SLOW_OPUS_DECODER) == 0 &&
-            (StreamConfig.streamingRemotely != STREAM_CFG_REMOTE || CHANNEL_COUNT_FROM_AUDIO_CONFIGURATION(StreamConfig.audioConfiguration) <= 2)) {
-        // If we have an RTSP URL string and it was successfully parsed and copied, use that string
-        if (serverInfo->rtspSessionUrl == NULL ||
-                !parseUrlAddrFromRtspUrlString(serverInfo->rtspSessionUrl, urlAddr, sizeof(urlAddr)) ||
-                !PltSafeStrcpy(rtspTargetUrl, sizeof(rtspTargetUrl), serverInfo->rtspSessionUrl)) {
-            // If an RTSP URL string was not provided or failed to parse, we will construct one now as best we can.
-            //
-            // NB: If the remote address is not a LAN address, the host will likely not enable high quality
-            // audio since it only does that for local streaming normally. We can avoid this limitation,
-            // but only if the caller gave us the RTSP session URL that it received from the host during launch.
-            addrToUrlSafeString(&RemoteAddr, urlAddr, sizeof(urlAddr));
-            snprintf(rtspTargetUrl, sizeof(rtspTargetUrl), "rtsp%s://%s:%u", useEnet ? "ru" : "", urlAddr, RtspPortNumber);
-        }
-    }
-    else {
-        PltSafeStrcpy(urlAddr, sizeof(urlAddr), "0.0.0.0");
-        snprintf(rtspTargetUrl, sizeof(rtspTargetUrl), "rtsp%s://%s:%u", useEnet ? "ru" : "", urlAddr, RtspPortNumber);
-    }
+    selectRtspTargetUrl(serverInfo, expectedVideoBitrate);
 
     switch (AppVersionQuad[0]) {
         case 3:
@@ -1131,80 +1247,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             goto Exit;
         }
         
-        // PyroWave is selected only when the client asked for it and the server both
-        // advertises SCM_PYROWAVE, offers the PYROWAVE media type, and declares
-        // the bitstream revision understood by the client decoder.
-        int pyroWaveFormat = selectPyroWaveFormat(StreamConfig.supportedVideoFormats,
-                                                  serverInfo->serverCodecModeSupport);
-        if (pyroWaveFormat != 0 && (response.payloadLength <= 0 ||
-            !hasCompatiblePyroWaveSdp(response.payload, (size_t)response.payloadLength))) {
-            Limelog("PyroWave unavailable: missing, ambiguous or incompatible SDP bitstream ID (expected "
-                    LI_PYROWAVE_BITSTREAM_ID "). Trying conventional codecs.\n");
-            pyroWaveFormat = 0;
-        }
-        // The PyroWave budget (bits per pixel) is not a sensible HEVC/AV1 request. It
-        // comes down to the configured fallback whenever PyroWave was asked for and
-        // is not what was negotiated, whether the server never advertised it at all
-        // or advertised it with an incompatible bitstream (C42-01).
-        {
-            int conventionalBitrate = conventionalBitrateAfterPyroWave(StreamConfig.supportedVideoFormats, pyroWaveFormat,
-                                                                       StreamConfig.bitrate, StreamConfig.pyroWaveFallbackBitrate);
-            if (conventionalBitrate != StreamConfig.bitrate) {
-                Limelog("Using the conventional bitrate of %d kbps instead of the PyroWave budget of %d kbps\n",
-                        conventionalBitrate, StreamConfig.bitrate);
-                StreamConfig.bitrate = conventionalBitrate;
-            }
-        }
-        if (pyroWaveFormat != 0) {
-            NegotiatedVideoFormat = pyroWaveFormat;
-        }
-        else if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_AV1) && strstr(response.payload, "AV1/90000")) {
-            if ((serverInfo->serverCodecModeSupport & SCM_AV1_HIGH10_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH10_444)) {
-                NegotiatedVideoFormat = VIDEO_FORMAT_AV1_HIGH10_444;
-            }
-            else if ((serverInfo->serverCodecModeSupport & SCM_AV1_MAIN10) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_MAIN10)) {
-                NegotiatedVideoFormat = VIDEO_FORMAT_AV1_MAIN10;
-            }
-            else if ((serverInfo->serverCodecModeSupport & SCM_AV1_HIGH8_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH8_444)) {
-                NegotiatedVideoFormat = VIDEO_FORMAT_AV1_HIGH8_444;
-            }
-            else {
-                NegotiatedVideoFormat = VIDEO_FORMAT_AV1_MAIN8;
-            }
-        }
-        else if ((StreamConfig.supportedVideoFormats & VIDEO_FORMAT_MASK_H265) && strstr(response.payload, "sprop-parameter-sets=AAAAAU")) {
-            // The RTSP DESCRIBE reply will contain a collection of SDP media attributes that
-            // describe the various supported video stream formats and include the SPS, PPS,
-            // and VPS (if applicable). We will use this information to determine whether the
-            // server can support HEVC. For some reason, they still set the MIME type of the HEVC
-            // format to H264, so we can't just look for the HEVC MIME type. What we'll do instead is
-            // look for the base 64 encoded VPS NALU prefix that is unique to the HEVC bitstream.
-            if ((serverInfo->serverCodecModeSupport & SCM_HEVC_REXT10_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_REXT10_444)) {
-                NegotiatedVideoFormat = VIDEO_FORMAT_H265_REXT10_444;
-            }
-            else if ((serverInfo->serverCodecModeSupport & SCM_HEVC_MAIN10) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_MAIN10)) {
-                NegotiatedVideoFormat = VIDEO_FORMAT_H265_MAIN10;
-            }
-            else if ((serverInfo->serverCodecModeSupport & SCM_HEVC_REXT8_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_REXT8_444)) {
-                NegotiatedVideoFormat = VIDEO_FORMAT_H265_REXT8_444;
-            }
-            else {
-                NegotiatedVideoFormat = VIDEO_FORMAT_H265;
-            }
-        }
-        else {
-            if ((serverInfo->serverCodecModeSupport & SCM_H264_HIGH8_444) && (StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H264_HIGH8_444)) {
-                NegotiatedVideoFormat = VIDEO_FORMAT_H264_HIGH8_444;
-            }
-            else {
-                NegotiatedVideoFormat = VIDEO_FORMAT_H264;
-            }
-
-            // Dimensions over 4096 are only supported with HEVC on NVENC
-            if (StreamConfig.width > 4096 || StreamConfig.height > 4096) {
-                Limelog("WARNING: Host PC doesn't support HEVC. Streaming at resolutions above 4K using H.264 will likely fail!\n");
-            }
-        }
+        NegotiatedVideoFormat = negotiateVideoFormat(serverInfo, &response);
 
         // Look for the SDP attribute that indicates we're dealing with a server that supports RFI
         ReferenceFrameInvalidationSupported = strstr(response.payload, "x-nv-video[0].refPicInvalidation") != NULL;
