@@ -255,6 +255,9 @@ static PPLT_CRYPTO_CONTEXT decryptionCtx;
 #define IDX_DS_ADAPTIVE_TRIGGERS 15
 #define IDX_STEAM_HAPTIC 16
 #define IDX_STEAM_SETTINGS 17
+// Settings chunks queued for the listener at most; a burst of haptic events never evicts one
+// (a 20-triple write arrives as three chunks, and a dropped chunk is a partial write applied).
+#define STEAM_SETTINGS_QUEUE_LIMIT 16
 
 #define CONTROL_STREAM_TIMEOUT_SEC 10
 #define CONTROL_STREAM_LINGER_TIMEOUT_SEC 2
@@ -1233,7 +1236,7 @@ static uint32_t asyncCallbackStateKey(void* value) {
         if (subkey == 0) return 0;
         break;
     case IDX_HDR_INFO: break;
-    case IDX_STEAM_SETTINGS: return 0;  // never coalesced: each chunk carries distinct ids
+    case IDX_STEAM_SETTINGS: return 0;  // never coalesced (each chunk carries distinct ids); bounded on its own
     default: return 0;
     }
     if (controller >= 16) return 0;
@@ -1241,6 +1244,9 @@ static uint32_t asyncCallbackStateKey(void* value) {
 }
 
 static bool isCallbackState(void* value) { return asyncCallbackStateKey(value) != 0; }
+// A settings chunk is an event (never coalesced), but one a burst of haptic events must not
+// evict: the controller would apply the write with a chunk missing. It has its own bound.
+static bool isSettingsCallback(void* value) { return ((PQUEUED_ASYNC_CALLBACK)value)->typeIndex == IDX_STEAM_SETTINGS; }
 static bool sameCallbackState(void* a, void* b) {
     uint32_t key = asyncCallbackStateKey(a);
     return key != 0 && key == asyncCallbackStateKey(b);
@@ -1414,8 +1420,8 @@ static void queueAsyncCallback(PNVCTL_ENET_PACKET_HEADER_V1 ctlHdr, int packetLe
     }
 
     void* displaced = NULL;
-    err = LbqOfferQueueItemPriority(&asyncCallbackQueue, queuedCb, &queuedCb->entry,
-        sameCallbackState, isCallbackState, 32, &displaced);
+    err = LbqOfferQueueItemClassed(&asyncCallbackQueue, queuedCb, &queuedCb->entry,
+        sameCallbackState, isCallbackState, 32, isSettingsCallback, STEAM_SETTINGS_QUEUE_LIMIT, &displaced);
     free(displaced);
     if (err != LBQ_SUCCESS) {
         Limelog("Failed to queue async callback: %d\n", err);

@@ -94,8 +94,8 @@ int main(void) {
         failures += !ordered;
     }
 
-    // Settings are transient events: a flood of them is bounded like other events, and a
-    // pending haptic stop (state) survives it.
+    // Settings are transient events with their own bound: a flood of them keeps only the newest
+    // STEAM_SETTINGS_QUEUE_LIMIT chunks, and a pending haptic stop (state) survives it.
     {
         unsigned char bytes[sizeof(NVCTL_ENET_PACKET_HEADER_V1) + 3 + STEAM_HAPTIC_REPORT_MAX] = {0};
         PNVCTL_ENET_PACKET_HEADER_V1 hdr = (PNVCTL_ENET_PACKET_HEADER_V1)bytes;
@@ -103,14 +103,64 @@ int main(void) {
         bytes[2] = 1; bytes[4] = 8; bytes[5] = 0x81; bytes[6] = 0;
         queueAsyncCallback(hdr, sizeof(bytes));
         for (unsigned i = 0; i < 1000; ++i) send_settings(1, STEAM_SETTINGS_SET_VALUES, 1, i & 0x7F);
-        int total = 0, states = 0;
+        int total = 0, states = 0, settings = 0, lastId = -1;
         void* value = NULL;
         while (LbqPollQueueElement(&asyncCallbackQueue, &value) == LBQ_SUCCESS) {
-            ++total; if (isCallbackState(value)) ++states; free(value);
+            PQUEUED_ASYNC_CALLBACK cb = value;
+            ++total; if (isCallbackState(value)) ++states;
+            if (cb->typeIndex == IDX_STEAM_SETTINGS) { ++settings; lastId = cb->data.steamSettings.triples[0]; }
+            free(value);
         }
-        bool bounded = states == 1 && total <= 33;
-        printf("%s settings flood is bounded (%d delivered) and keeps the pending haptic stop\n", bounded ? "PASS" : "FAIL", total);
+        bool bounded = states == 1 && settings == STEAM_SETTINGS_QUEUE_LIMIT && total == STEAM_SETTINGS_QUEUE_LIMIT + 1 && lastId == (999 & 0x7F);
+        printf("%s settings flood is bounded to its own limit (%d delivered, newest last) and keeps the pending haptic stop\n", bounded ? "PASS" : "FAIL", total);
         failures += !bounded;
+    }
+
+    // A burst of ordinary haptic events (pulses, not stops) beyond the 32-event bound evicts
+    // only haptic events: a settings chunk queued before it is delivered whole, and first.
+    {
+        send_settings(2, STEAM_SETTINGS_SET_VALUES, 3, 20);
+        unsigned char bytes[sizeof(NVCTL_ENET_PACKET_HEADER_V1) + 3 + STEAM_HAPTIC_REPORT_MAX] = {0};
+        PNVCTL_ENET_PACKET_HEADER_V1 hdr = (PNVCTL_ENET_PACKET_HEADER_V1)bytes;
+        hdr->type = packetTypes[IDX_STEAM_HAPTIC];
+        // 81 <side> 90 01 00 00 01 00: Steam's 400 us slide pulse, an event the queue may evict.
+        bytes[2] = 2; bytes[4] = 8; bytes[5] = 0x81; bytes[6] = 1; bytes[7] = 0x90; bytes[8] = 0x01; bytes[11] = 0x01;
+        for (unsigned i = 0; i < 40; ++i) queueAsyncCallback(hdr, sizeof(bytes));
+        int n = 0, haptics = 0, settings = 0, settingsAt = -1, count = -1;
+        void* value = NULL;
+        while (LbqPollQueueElement(&asyncCallbackQueue, &value) == LBQ_SUCCESS) {
+            PQUEUED_ASYNC_CALLBACK cb = value;
+            if (cb->typeIndex == IDX_STEAM_SETTINGS) { ++settings; settingsAt = n; count = cb->data.steamSettings.count; }
+            else if (cb->typeIndex == IDX_STEAM_HAPTIC) ++haptics;
+            ++n; free(value);
+        }
+        bool kept = settings == 1 && settingsAt == 0 && count == 3 && haptics == 32 && n == 33;
+        printf("%s a 40-pulse haptic burst evicts only haptic events (%d kept) and leaves the queued settings chunk intact\n",
+               kept ? "PASS" : "FAIL", haptics);
+        failures += !kept;
+    }
+
+    // The same burst arriving while several chunks of one write wait: all of them survive, in order.
+    {
+        send_settings(2, STEAM_SETTINGS_SET_VALUES, 9, 0);
+        send_settings(2, STEAM_SETTINGS_SET_VALUES, 9, 9);
+        send_settings(2, STEAM_SETTINGS_SET_VALUES, 2, 18);
+        unsigned char bytes[sizeof(NVCTL_ENET_PACKET_HEADER_V1) + 3 + STEAM_HAPTIC_REPORT_MAX] = {0};
+        PNVCTL_ENET_PACKET_HEADER_V1 hdr = (PNVCTL_ENET_PACKET_HEADER_V1)bytes;
+        hdr->type = packetTypes[IDX_STEAM_HAPTIC];
+        bytes[2] = 2; bytes[4] = 8; bytes[5] = 0x81; bytes[6] = 0; bytes[7] = 0x90; bytes[8] = 0x01; bytes[11] = 0x01;
+        for (unsigned i = 0; i < 40; ++i) queueAsyncCallback(hdr, sizeof(bytes));
+        int order[3] = {-1, -1, -1}, chunks = 0, haptics = 0;
+        void* value = NULL;
+        while (LbqPollQueueElement(&asyncCallbackQueue, &value) == LBQ_SUCCESS) {
+            PQUEUED_ASYNC_CALLBACK cb = value;
+            if (cb->typeIndex == IDX_STEAM_SETTINGS) { if (chunks < 3) order[chunks] = cb->data.steamSettings.triples[0]; ++chunks; }
+            else ++haptics;
+            free(value);
+        }
+        bool whole = chunks == 3 && order[0] == 0 && order[1] == 9 && order[2] == 18 && haptics == 32;
+        printf("%s a chunked write survives a haptic burst whole and in order (%d chunks, %d pulses)\n", whole ? "PASS" : "FAIL", chunks, haptics);
+        failures += !whole;
     }
 
     LbqSignalQueueShutdown(&asyncCallbackQueue);
