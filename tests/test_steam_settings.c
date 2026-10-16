@@ -163,6 +163,68 @@ int main(void) {
         failures += !whole;
     }
 
+    // Fill the production-sized queue with the 241 supported state keys plus
+    // fifteen settings chunks. No ordinary event is available for eviction.
+    // An incoming pulse must be refused, not take the oldest settings chunk.
+    {
+        for (int id = 0; id < 16; ++id) {
+            for (int kind = 0; kind < 15; ++kind) {
+                PQUEUED_ASYNC_CALLBACK cb = calloc(1, sizeof(*cb));
+                if (cb == NULL) return 2;
+                if (kind < 7) {
+                    cb->typeIndex = IDX_STEAM_HAPTIC;
+                    cb->data.steamHaptic.controllerNumber = id;
+                    cb->data.steamHaptic.length = 12;
+                    cb->data.steamHaptic.report[0] = kind == 0 ? 0x80 : kind < 4 ? 0x81 : 0x82;
+                    cb->data.steamHaptic.report[1] = kind == 0 ? 0 : (kind - 1) % 3;
+                }
+                else if (kind == 7) { cb->typeIndex = IDX_RUMBLE_DATA; cb->data.rumble.controllerNumber = id; }
+                else if (kind == 8) { cb->typeIndex = IDX_RUMBLE_TRIGGER_DATA; cb->data.rumbleTriggers.controllerNumber = id; }
+                else if (kind == 9) { cb->typeIndex = IDX_SET_RGB_LED; cb->data.setControllerLed.controllerNumber = id; }
+                else if (kind < 12) { cb->typeIndex = IDX_SET_MOTION_EVENT; cb->data.setMotionEventState.controllerNumber = id; cb->data.setMotionEventState.motionType = kind - 9; }
+                else { cb->typeIndex = IDX_DS_ADAPTIVE_TRIGGERS; cb->data.dsAdaptiveTrigger.controllerNumber = id; cb->data.dsAdaptiveTrigger.eventFlags = 4 * (kind - 11); }
+                void* old = NULL;
+                if (LbqOfferQueueItemClassed(&asyncCallbackQueue, cb, &cb->entry, sameCallbackState, isCallbackState, 32,
+                        isSettingsCallback, STEAM_SETTINGS_QUEUE_LIMIT, &old) != LBQ_SUCCESS) { free(cb); ++failures; }
+                free(old);
+            }
+        }
+        PQUEUED_ASYNC_CALLBACK hdrState = calloc(1, sizeof(*hdrState));
+        if (hdrState == NULL) return 2;
+        hdrState->typeIndex = IDX_HDR_INFO;
+        void* old = NULL;
+        if (LbqOfferQueueItemClassed(&asyncCallbackQueue, hdrState, &hdrState->entry, sameCallbackState, isCallbackState, 32,
+                isSettingsCallback, STEAM_SETTINGS_QUEUE_LIMIT, &old) != LBQ_SUCCESS) { free(hdrState); ++failures; }
+        free(old);
+        for (unsigned i = 0; i < 15; ++i) send_settings(2, STEAM_SETTINGS_SET_VALUES, 1, i);
+        bool filled = LbqGetItemCount(&asyncCallbackQueue) == 256;
+        printf("%s real callback capacity is filled with state and reserved settings\n", filled ? "PASS" : "FAIL");
+        failures += !filled;
+
+        unsigned char bytes[sizeof(NVCTL_ENET_PACKET_HEADER_V1) + 3 + STEAM_HAPTIC_REPORT_MAX] = {0};
+        PNVCTL_ENET_PACKET_HEADER_V1 hdr = (PNVCTL_ENET_PACKET_HEADER_V1)bytes;
+        hdr->type = packetTypes[IDX_STEAM_HAPTIC];
+        bytes[2] = 2; bytes[4] = 8; bytes[5] = 0x81; bytes[7] = 0x90; bytes[8] = 0x01; bytes[11] = 0x01;
+        queueAsyncCallback(hdr, sizeof(bytes));
+        int states = 0, settings = 0, pulses = 0;
+        bool ordered = true;
+        void* value = NULL;
+        while (LbqPollQueueElement(&asyncCallbackQueue, &value) == LBQ_SUCCESS) {
+            PQUEUED_ASYNC_CALLBACK cb = value;
+            if (isSettingsCallback(cb)) {
+                ordered &= cb->data.steamSettings.triples[0] == settings;
+                ++settings;
+            }
+            else if (isCallbackState(cb)) ++states;
+            else ++pulses;
+            free(value);
+        }
+        bool kept = states == 241 && settings == 15 && pulses == 0 && ordered;
+        printf("%s at total capacity a pulse cannot evict reserved settings (%d states, %d settings, %d pulses)\n",
+               kept ? "PASS" : "FAIL", states, settings, pulses);
+        failures += !kept;
+    }
+
     LbqSignalQueueShutdown(&asyncCallbackQueue);
     LbqDestroyLinkedBlockingQueue(&asyncCallbackQueue);
     printf("Steam settings parser: %d failures\n", failures);

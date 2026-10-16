@@ -139,7 +139,12 @@ int LbqOfferQueueItemClassed(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINK
         if (victim == NULL) {
             if (isReserved && reservedLimit > 0 && reservedEvents >= reservedLimit) victim = firstReserved;
             else if (!important && !isReserved && eventLimit > 0 && events >= eventLimit) victim = firstEvent;
-            else if (queueHead->currentSize == queueHead->sizeBound) victim = firstEvent != NULL ? firstEvent : firstReserved;
+            else if (queueHead->currentSize == queueHead->sizeBound) {
+                victim = firstEvent;
+                // Total capacity must honor the same class protection as the
+                // event budget: an ordinary event cannot displace settings.
+                if (victim == NULL && (important || isReserved)) victim = firstReserved;
+            }
         }
         if (victim != NULL) {
             if (victim->blink) victim->blink->flink = victim->flink;
