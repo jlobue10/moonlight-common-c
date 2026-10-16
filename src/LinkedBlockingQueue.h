@@ -39,8 +39,9 @@ int LbqOfferQueueItemPriority(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLIN
 // As above, with a third class of item: a reserved event (reserved(data) true, not a priority
 // item) is counted and bounded on its own (a positive reservedLimit) and is never displaced to
 // make room for an ordinary event, so a burst of those evicts only the oldest of its own kind.
-// A queue at its size bound still displaces the oldest ordinary event first, then the oldest
-// reserved one. reserved may be NULL (then this is LbqOfferQueueItemPriority).
+// At the total size bound, priority/reserved arrivals displace the oldest ordinary event
+// first, then the oldest reserved one. An ordinary arrival is refused if only protected
+// items remain. reserved may be NULL (then this is LbqOfferQueueItemPriority).
 int LbqOfferQueueItemClassed(PLINKED_BLOCKING_QUEUE queueHead, void* data, PLINKED_BLOCKING_QUEUE_ENTRY entry,
     bool (*matches)(void*, void*), bool (*priority)(void*), int eventLimit,
     bool (*reserved)(void*), int reservedLimit, void** displaced);
