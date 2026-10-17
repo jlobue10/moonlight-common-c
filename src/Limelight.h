@@ -540,6 +540,26 @@ typedef void(*ConnListenerSetControllerLED)(uint16_t controllerNumber, uint8_t r
 // Only advertise LI_CCAP_HAPTICS_PCM for controllers with a working renderer.
 typedef void(*ConnListenerControllerHaptics)(uint16_t controllerNumber, uint32_t sequence, const uint8_t* pcm, uint16_t frames);
 
+// Vibepollo extension: a Steam Controller (2026) haptic output report the host's virtual
+// controller received, for a client that drives the real controller's pads. `report` is the
+// report as the host wrote it, its id first (0x80 rumble, 0x81 pulse, 0x82 command, 0x83 LFO
+// tone, 0x84 log sweep, 0x85 script), `length` bytes long. Sent only to clients that set
+// LI_CCAP_STEAM_HAPTIC; such a client gets no ConnListenerRumble() for these reports.
+#define STEAM_HAPTIC_REPORT_MAX 12
+typedef void(*ConnListenerSteamHaptic)(uint16_t controllerNumber, uint8_t length, const uint8_t *report);
+
+// Vibepollo extension: a Steam Controller (2026) settings write the host's virtual controller
+// received on its control channel, for a client that drives the real controller. `command` is
+// 0x87 (SET_SETTINGS_VALUES) with `count` (id, lo, hi) triples in `triples`, at most
+// STEAM_SETTINGS_TRIPLES_MAX per callback (a longer write arrives as several callbacks, in
+// order), or 0x8E (LOAD_DEFAULT_SETTINGS) with count 0. Sent only to clients that set
+// LI_CCAP_STEAM_SETTINGS. The client decides which ids reach its controller.
+#define STEAM_SETTINGS_TRIPLES_MAX 9
+#define STEAM_SETTINGS_PAYLOAD_SIZE (STEAM_SETTINGS_TRIPLES_MAX * 3)
+#define STEAM_SETTINGS_SET_VALUES 0x87
+#define STEAM_SETTINGS_LOAD_DEFAULTS 0x8E
+typedef void(*ConnListenerSteamSettings)(uint16_t controllerNumber, uint8_t command, uint8_t count, const uint8_t *triples);
+
 typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerStageStarting stageStarting;
     ConnListenerStageComplete stageComplete;
@@ -555,6 +575,8 @@ typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerSetControllerLED setControllerLED;
     ConnListenerSetAdaptiveTriggers setAdaptiveTriggers;
     ConnListenerControllerHaptics controllerHaptics;
+    ConnListenerSteamHaptic steamHaptic;
+    ConnListenerSteamSettings steamSettings;
 } CONNECTION_LISTENER_CALLBACKS, *PCONNECTION_LISTENER_CALLBACKS;
 
 // Use this function to zero the connection callbacks when allocated on the stack or heap
@@ -798,6 +820,21 @@ int LiSendUtf8TextEvent(const char *text, unsigned int length);
 #define PADDLE4_FLAG  0x080000
 #define TOUCHPAD_FLAG 0x100000 // Touchpad buttons on Sony controllers
 #define MISC_FLAG     0x200000 // Share/Mic/Capture/Mute buttons on various controllers
+// Moonlight extension (Vibepollo + libvirtualgamepad): capacitive grip sensors of the
+// Steam Controller (2026). Not buttons: they say the controller is being held. Sent only
+// by clients that set LI_CCAP_GRIP_SENSE; stock hosts ignore the upper flag bits.
+#define LEFT_GRIP_TOUCH_FLAG  0x400000
+#define RIGHT_GRIP_TOUCH_FLAG 0x800000
+// Capacitive touch of its sticks (held, not pressed). Sent only by clients that set
+// LI_CCAP_STICK_TOUCH; without it the host derives stick touch from deflection.
+#define LEFT_STICK_TOUCH_FLAG  0x1000000
+#define RIGHT_STICK_TOUCH_FLAG 0x2000000
+// Physical SC2026 pad and trigger clicks (LI_CCAP_SC26_BUTTONS). Keep TOUCHPAD_FLAG
+// alongside the per-pad bits for hosts that predate this extension.
+#define LEFT_PAD_CLICK_FLAG      0x04000000
+#define RIGHT_PAD_CLICK_FLAG     0x08000000
+#define LEFT_TRIGGER_CLICK_FLAG  0x10000000
+#define RIGHT_TRIGGER_CLICK_FLAG 0x20000000
 
 // This function queues a controller event to be sent to the remote server. It will
 // be seen by the computer as the first controller.
@@ -846,6 +883,14 @@ int LiSendMultiControllerEvent(short controllerNumber, short activeGamepadMask,
 #define LI_CCAP_BATTERY_STATE   0x40 // Reports battery state via LiSendControllerBatteryEvent()
 #define LI_CCAP_RGB_LED         0x80 // Can set RGB LED state via ConnListenerSetControllerLED()
 #define LI_CCAP_DUAL_TOUCHPAD  0x100 // Reports touchpad events from 2 separate touchpads
+#define LI_CCAP_GRIP_SENSE     0x200 // Reports capacitive grip touch via LEFT/RIGHT_GRIP_TOUCH_FLAG (Vibepollo extension)
+#define LI_CCAP_STICK_TOUCH    0x400 // Reports capacitive stick touch via LEFT/RIGHT_STICK_TOUCH_FLAG (Vibepollo extension)
+#define LI_CCAP_STEAM_HAPTIC   0x800 // Replays Steam Controller haptic reports via ConnListenerSteamHaptic() (Vibepollo extension)
+// Reports independent physical pad/trigger clicks, including their released state.
+// Grip/stick touch flags are also authoritative from the first state. No packet size change.
+#define LI_CCAP_SC26_BUTTONS   0x1000 // Vibepollo extension; see *_CLICK_FLAG
+#define LI_CCAP_STEAM_SETTINGS 0x2000 // Applies Steam Controller settings writes via ConnListenerSteamSettings() (Vibepollo extension)
+#define LI_CCAP_STEAM_ATTRIBUTES 0x4000 // Sends the real Steam Controller's firmware attributes via LiSendSteamControllerAttributesEvent() (Vibepollo extension)
 int LiSendControllerArrivalEvent(uint8_t controllerNumber, uint16_t activeGamepadMask, uint8_t type,
                                  uint32_t supportedButtonFlags, uint16_t capabilities);
 
@@ -891,6 +936,50 @@ int LiSendControllerMotionEvent(uint8_t controllerNumber, uint8_t motionType, fl
 #define LI_BATTERY_STATE_FULL         0x05
 #define LI_BATTERY_PERCENTAGE_UNKNOWN 0xFF
 int LiSendControllerBatteryEvent(uint8_t controllerNumber, uint8_t batteryState, uint8_t batteryPercentage);
+
+// Vibepollo extension: the real Steam Controller (2026)'s firmware attributes, read by the client
+// from the controller it is connected to (GET_ATTRIBUTES_VALUES 0x83, GET_DEVICE_INFO 0xF2 sub 0,
+// GET_STRING_ATTRIBUTE 0xAE). A host whose virtual Steam Controller answers Steam's attribute
+// queries echoes them, so Steam sees the real unit's firmware build and offers a firmware update
+// only when the real controller needs one. (Never start that update while streaming: it would
+// target the virtual controller on the host, not the real one.) The host applies a late packet
+// too, so a client may send this after the first input; stock hosts ignore the packet.
+//
+// Which fields of LI_STEAM_CONTROLLER_ATTRIBUTES carry a value read from the controller
+#define LI_SCATTR_FIRMWARE_BUILD_TIME   0x01
+#define LI_SCATTR_BOOTLOADER_BUILD_TIME 0x02
+#define LI_SCATTR_BOARD_REVISION        0x04
+#define LI_SCATTR_CAPABILITIES          0x08
+#define LI_SCATTR_RADIO_FW_BUILD_TIME   0x10
+#define LI_SCATTR_DONGLE_FW_BUILD_TIME  0x20
+#define LI_SCATTR_BUILD_ID              0x40
+#define LI_SCATTR_SERIALS               0x80
+
+// How the client is connected to the real unit (informational)
+#define LI_SCATTR_TRANSPORT_USB  0
+#define LI_SCATTR_TRANSPORT_BLE  1
+#define LI_SCATTR_TRANSPORT_PUCK 2
+
+typedef struct _LI_STEAM_CONTROLLER_ATTRIBUTES {
+    uint8_t  transport;               // LI_SCATTR_TRANSPORT_*
+    uint8_t  validMask;               // LI_SCATTR_* bits
+    uint8_t  reserved[2];             // zero
+    uint32_t firmwareBuildTime;       // GET_ATTRIBUTES tag 4 (unix seconds)
+    uint32_t bootloaderBuildTime;     // tag 10
+    uint32_t boardRevision;           // tag 9
+    uint32_t capabilities;            // tag 2
+    uint32_t radioFirmwareBuildTime;  // tag 5 (0 if absent)
+    uint32_t dongleFirmwareBuildTime; // tag 8 (0 if absent; puck only)
+    char     buildId[16];             // GET_DEVICE_INFO sub 0 build id (12 ASCII chars), NUL padded
+    char     unitSerial[16];          // GET_STRING_ATTRIBUTE tag 1 ("FXA..."), NUL padded
+    char     boardSerial[16];         // GET_STRING_ATTRIBUTE tag 0 ("MXA..."), NUL padded
+} LI_STEAM_CONTROLLER_ATTRIBUTES, *PLI_STEAM_CONTROLLER_ATTRIBUTES;
+
+// Sends the real controller's attributes for a controller previously announced with
+// LiSendControllerArrivalEvent() and LI_CTYPE_STEAM. Reliable, same channel as the arrival event,
+// so it is ordered after it. Strings are truncated to 15 characters, NUL terminated, and
+// non-printable characters become '?'. Only sent to Sunshine-derived hosts; LI_ERR_UNSUPPORTED otherwise.
+int LiSendSteamControllerAttributesEvent(uint8_t controllerNumber, const LI_STEAM_CONTROLLER_ATTRIBUTES* attributes);
 
 // This function queues a vertical scroll event to the remote server.
 // The number of "clicks" is multiplied by WHEEL_DELTA (120) before
