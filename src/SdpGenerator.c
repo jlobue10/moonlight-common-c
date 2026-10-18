@@ -1,4 +1,5 @@
 #include "Limelight-internal.h"
+#include "ControllerHaptics.h"
 #include <inttypes.h>
 
 #define MAX_OPTION_NAME_LEN 128
@@ -270,6 +271,7 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
     if (IS_SUNSHINE()) {
         // Send client feature flags to Sunshine hosts
         uint32_t moonlightFeatureFlags = ML_FF_FEC_STATUS | ML_FF_SESSION_ID_V1;
+        if (ListenerCallbacks.controllerHaptics) moonlightFeatureFlags |= ML_FF_HAPTICS_PCM;
         snprintf(payloadStr, sizeof(payloadStr), "%" PRIu32, moonlightFeatureFlags);
         err |= addAttributeString(&optionHead, "x-ml-general.featureFlags", payloadStr);
 
@@ -441,11 +443,31 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
         if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_PYROWAVE) {
             // The PyroWave wire format uses its own packet decoder and is not an AV1 bitstream.
             err |= addAttributeString(&optionHead, "x-nv-vqos[0].bitStreamFormat", "3");
+
             // Vibepollo frames PyroWave two ways (docs/pyrowave-protocol.md): length-prefixed
             // packets for clients that say nothing, or record framing with in-band padding
-            // records for clients that set bit 0x1 here. Record framing adds parity to the
-            // frame's coarsest wavelet level, so a lost packet costs detail, not the frame.
-            err |= addAttributeString(&optionHead, "x-ss-video[0].pyrowaveFeatures", "1");
+            // records for clients that set bit 0x1 in pyrowaveFeatures (or, Aurora-style, send
+            // pyrowaveAdaptiveFec at all). Record framing adds parity to the frame's coarsest
+            // wavelet level and marks record starts, so a lost packet costs detail, not the
+            // frame. We never ask for the adaptive modes.
+            err |= addAttributeString(&optionHead, "x-ss-video[0].pyrowaveAdaptiveFec", "0");
+            err |= addAttributeString(&optionHead, "x-ss-video[0].pyrowaveAdaptiveBitrate", "0");
+
+            const unsigned int pyrowaveFeatures = PYROWAVE_FEATURE_RECORD_FRAMING |
+                (StreamConfig.pyrowaveCompression ? PYROWAVE_FEATURE_COMPRESSION : 0);
+            snprintf(payloadStr, sizeof(payloadStr), "%u", pyrowaveFeatures);
+            err |= addAttributeString(&optionHead, "x-ss-video[0].pyrowaveFeatures", payloadStr);
+            if (StreamConfig.pyrowaveCompression) {
+                err |= addAttributeString(&optionHead, "x-ss-video[0].pyrowaveCompression", "1");
+            }
+            if (StreamConfig.pyrowaveLinkMbps > 0) {
+                snprintf(payloadStr, sizeof(payloadStr), "%d", StreamConfig.pyrowaveLinkMbps);
+                err |= addAttributeString(&optionHead, "x-ss-video[0].pyrowaveLinkMbps", payloadStr);
+            }
+            if (StreamConfig.pyrowavePaceMbps > 0) {
+                snprintf(payloadStr, sizeof(payloadStr), "%d", StreamConfig.pyrowavePaceMbps);
+                err |= addAttributeString(&optionHead, "x-ss-video[0].pyrowavePaceMbps", payloadStr);
+            }
         }
         else if (NegotiatedVideoFormat & VIDEO_FORMAT_MASK_AV1) {
             err |= addAttributeString(&optionHead, "x-nv-vqos[0].bitStreamFormat", "2");

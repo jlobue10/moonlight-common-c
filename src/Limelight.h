@@ -107,6 +107,19 @@ typedef struct _STREAM_CONFIGURATION {
     // in /launch and /resume requests.
     char remoteInputAesKey[16];
     char remoteInputAesIv[16];
+
+    // Request independent PyroWave compression only after checking host support.
+    // Zero preserves the normal intra-only PyroWave stream.
+    int pyrowaveCompression;
+
+    // Routed client wired-link speed in Mbps, used by PyroWave host pacing.
+    // Zero means unknown; other codecs do not advertise this value.
+    int pyrowaveLinkMbps;
+
+    // Highest frame pace in Mbps that calibration kept within its loss limit.
+    // The host paces PyroWave frames at this rate instead of its default
+    // link headroom. Zero means uncalibrated; only sent for PyroWave.
+    int pyrowavePaceMbps;
 } STREAM_CONFIGURATION, *PSTREAM_CONFIGURATION;
 
 // Use this function to zero the stream configuration when allocated on the stack or heap
@@ -120,6 +133,17 @@ void LiInitializeStreamConfiguration(PSTREAM_CONFIGURATION streamConfig);
 #define BUFFER_TYPE_PPS      0x02
 #define BUFFER_TYPE_VPS      0x03
 
+// A zero-filled buffer standing in for a packet that never arrived. Only
+// PyroWave frames carry these: every PyroWave frame is independent, so a frame
+// with missing packets is still delivered and the decoder salvages the rest.
+// The buffer has the length the lost packet's payload would have had.
+#define BUFFER_TYPE_LOST     0x04
+
+// PyroWave picture data whose first byte starts a record, as flagged by the
+// host (vibeshine). After a lost record header, parsing resumes at the next
+// such buffer. Other PyroWave picture data is BUFFER_TYPE_PICDATA.
+#define BUFFER_TYPE_RECORD_START 0x05
+
 typedef struct _LENTRY {
     // Pointer to the next entry or NULL if this is the last entry
     struct _LENTRY* next;
@@ -130,7 +154,8 @@ typedef struct _LENTRY {
     // Size of data in bytes (never <= 0)
     int length;
 
-    // Buffer type (listed above, only set for H.264 and HEVC formats)
+    // Buffer type (listed above, only set for H.264 and HEVC formats, except
+    // BUFFER_TYPE_LOST and BUFFER_TYPE_RECORD_START which PyroWave frames carry)
     int bufferType;
 } LENTRY, *PLENTRY;
 
@@ -198,6 +223,12 @@ typedef struct _DECODE_UNIT {
     // Note: This is not currently parsed from the actual bitstream, so if your
     // client has access to a bitstream parser, prefer that over this field.
     uint8_t colorspace;
+
+    // PyroWave only: the number of leading buffers (RTP packets) that hold the
+    // sequence header and the coarsest wavelet level, as the host announced it
+    // in the frame header, or 0 if it did not. A frame that lost any of them
+    // cannot be decoded; a loss after them only blurs part of the picture.
+    uint16_t pyrowaveCriticalPackets;
 } DECODE_UNIT, *PDECODE_UNIT;
 
 // Specifies that the audio stream should be encoded in stereo (default)
@@ -249,18 +280,29 @@ typedef struct _DECODE_UNIT {
 #define VIDEO_FORMAT_PYROWAVE_HDR10     0x40000 // PyroWave 10-bit 4:2:0 (HDR10 on an HDR display)
 #define VIDEO_FORMAT_PYROWAVE_HDR10_444 0x80000 // PyroWave 10-bit 4:4:4
 
-// PyroWave has no in-band version. Keep this ID in sync with the client decoder
-// when updating the vendored codec. Unversioned or mismatched hosts fall back
-// to a conventional codec during RTSP negotiation.
-#define LI_PYROWAVE_BITSTREAM_ID "186f0393"
-
 // Masks for clients to use to match video codecs without profile-specific details.
-#define VIDEO_FORMAT_MASK_H264   0x000F
-#define VIDEO_FORMAT_MASK_H265   0x0F00
-#define VIDEO_FORMAT_MASK_AV1    0xF000
+#define VIDEO_FORMAT_MASK_H264     0x000F
+#define VIDEO_FORMAT_MASK_H265     0x0F00
+#define VIDEO_FORMAT_MASK_AV1      0xF000
 #define VIDEO_FORMAT_MASK_PYROWAVE 0xF0000
-#define VIDEO_FORMAT_MASK_10BIT  0xCAA00 // includes the two 10-bit PyroWave profiles
-#define VIDEO_FORMAT_MASK_YUV444 0xACC04 // includes the two 4:4:4 PyroWave profiles
+#define VIDEO_FORMAT_MASK_10BIT    0xCAA00 // includes the two 10-bit PyroWave profiles
+#define VIDEO_FORMAT_MASK_YUV444   0xACC04 // includes the two 4:4:4 PyroWave profiles
+
+// PyroWave bitstream identity (first 8 hex digits of the pyrowave commit the
+// codec was vendored from). The bitstream has no version field of its own, so
+// Sunshine hosts advertise theirs in the RTSP DESCRIBE response. Keep it in sync
+// with the client decoder when updating the vendored codec: a host that advertises
+// none, or a different one, falls back to a conventional codec during RTSP
+// negotiation (the advertised value is kept, see LiGetHostPyroWaveBitstreamId()).
+#define PYROWAVE_BITSTREAM_ID "186f0393"
+#define LI_PYROWAVE_BITSTREAM_ID PYROWAVE_BITSTREAM_ID // older name, same value
+
+// x-ss-video[0].pyrowaveFeatures bits sent in the RTSP ANNOUNCE.
+// Partial-frame decoding needs no bit: a record-framed client always decodes
+// what arrives, and 0x2 (once reserved for it) is ignored by hosts.
+#define PYROWAVE_FEATURE_RECORD_FRAMING 0x1 // Parses record framing with padding records
+#define PYROWAVE_FEATURE_COMPRESSION         0x8 // Independent LZ4 detail groups; no frame references (retired by Vibepollo, never requested)
+#define PYROWAVE_COMPRESSION_VERSION         1
 
 // If set in the renderer capabilities field, this flag will cause audio/video data to
 // be submitted directly from the receive thread. This should only be specified if the
@@ -530,6 +572,11 @@ typedef void(*ConnListenerSteamHaptic)(uint16_t controllerNumber, uint8_t length
 #define STEAM_SETTINGS_LOAD_DEFAULTS 0x8E
 typedef void(*ConnListenerSteamSettings)(uint16_t controllerNumber, uint8_t command, uint8_t count, const uint8_t *triples);
 
+// Bounded haptic PCM callback on the control receive thread. Must not block.
+// Data is borrowed for the duration of the callback; copy before returning.
+// Only advertise LI_CCAP_HAPTICS_PCM for controllers with a working renderer.
+typedef void(*ConnListenerControllerHaptics)(uint16_t controllerNumber, uint32_t sequence, const uint8_t* pcm, uint16_t frames);
+
 typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerStageStarting stageStarting;
     ConnListenerStageComplete stageComplete;
@@ -546,6 +593,7 @@ typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerSetAdaptiveTriggers setAdaptiveTriggers;
     ConnListenerSteamHaptic steamHaptic;
     ConnListenerSteamSettings steamSettings;
+    ConnListenerControllerHaptics controllerHaptics;
 } CONNECTION_LISTENER_CALLBACKS, *PCONNECTION_LISTENER_CALLBACKS;
 
 // Use this function to zero the connection callbacks when allocated on the stack or heap
@@ -996,6 +1044,15 @@ uint64_t LiGetMicroseconds(void);
 // It should only ever be compared with the return value from a previous call to itself.
 uint64_t LiGetMillis(void);
 
+// PyroWave only. Called on the video receive thread with the RTP timestamp of a
+// frame whose final FEC block is still incomplete. Return the latest
+// LiGetMicroseconds() time at which that frame can finish reassembly and still
+// reach its presentation slot, or 0 when unknown. Past that time, a frame with
+// its critical packets is delivered after a much shorter packet silence than
+// usual. Set it before LiStartConnection(); NULL disables it.
+typedef uint64_t (*LiVideoReassemblyDeadlineCallback)(uint32_t rtpTimestamp);
+void LiSetVideoReassemblyDeadlineCallback(LiVideoReassemblyDeadlineCallback callback);
+
 // This is a simplistic STUN function that can assist clients in getting the WAN address
 // for machines they find using mDNS over IPv4. This can be used to pre-populate the external
 // address for streaming after GFE stopped sending it a while back. wanAddr is returned in
@@ -1153,6 +1210,12 @@ bool LiGetHdrMetadata(PSS_HDR_METADATA metadata);
 // snapshot. Returns true when the metadata is valid, i.e. a Sunshine-class host
 // reported HDR enabled. Use this from the setHdrMode callback instead of two reads.
 bool LiGetHdrState(bool* enabled, PSS_HDR_METADATA metadata);
+
+// Returns the PyroWave bitstream identity the host advertised in its RTSP DESCRIBE
+// response (see PYROWAVE_BITSTREAM_ID), or an empty string if it sent none. Hosts
+// that encode PyroWave without advertising it use an unknown bitstream revision.
+// Valid after the RTSP handshake. This is a Sunshine protocol extension.
+const char* LiGetHostPyroWaveBitstreamId(void);
 
 // This function requests an IDR frame from the host. Typically this is done using DR_NEED_IDR, but clients
 // processing frames asynchronously may need to reset their decoder state even after returning DR_OK for

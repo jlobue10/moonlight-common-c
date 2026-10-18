@@ -21,6 +21,9 @@ static PPLT_CRYPTO_CONTEXT encryptionCtx;
 static PPLT_CRYPTO_CONTEXT decryptionCtx;
 static uint32_t encryptionSequenceNumber;
 
+// PyroWave bitstream identity from the DESCRIBE response ("" when absent)
+static char hostPyroWaveBitstreamId[32];
+
 static SOCKET sock = INVALID_SOCKET;
 static ENetHost* client;
 static ENetPeer* peer;
@@ -945,6 +948,33 @@ static bool parseUrlAddrFromRtspUrlString(const char* rtspUrlString, char* desti
 
 // SDP attributes are in the form:
 // a=x-nv-bwe.bwuSafeZoneLowLimit:70\r\n
+// Copies a token-valued SDP attribute (up to whitespace) into val
+static bool parseSdpAttributeToToken(const char* payload, const char* name, char* val, size_t valSize) {
+    const char* attribute = strstr(payload, name);
+    if (!attribute || valSize == 0) {
+        return false;
+    }
+
+    const char* valst = strstr(attribute, ":");
+    if (!valst) {
+        return false;
+    }
+    valst++;
+
+    size_t len = 0;
+    while (valst[len] != '\0' && valst[len] != '\r' && valst[len] != '\n' &&
+           valst[len] != ' ' && len + 1 < valSize) {
+        val[len] = valst[len];
+        len++;
+    }
+    val[len] = '\0';
+    return len != 0;
+}
+
+const char* LiGetHostPyroWaveBitstreamId(void) {
+    return hostPyroWaveBitstreamId;
+}
+
 bool parseSdpAttributeToUInt(const char* payload, const char* name, uint32_t* val) {
     // Find the entry for the specified attribute name
     char* attribute = strstr(payload, name);
@@ -1249,7 +1279,15 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
             freeMessage(&response);
             goto Exit;
         }
-        
+
+        // Keep the host's advertised PyroWave bitstream revision for LiGetHostPyroWaveBitstreamId();
+        // the negotiation below still refuses a host whose revision is absent or different.
+        hostPyroWaveBitstreamId[0] = '\0';
+        if (response.payloadLength > 0 && response.payload != NULL) {
+            parseSdpAttributeToToken(response.payload, "x-ss-pyrowave.bitstream",
+                                     hostPyroWaveBitstreamId, sizeof(hostPyroWaveBitstreamId));
+        }
+
         NegotiatedVideoFormat = negotiateVideoFormat(serverInfo, &response);
 
         // Look for the SDP attribute that indicates we're dealing with a server that supports RFI
