@@ -5,7 +5,7 @@
 #define PltGetMillis testGetMillis
 #include "../src/Limelight-internal.h"
 static SOCKET testBind(int addressFamily, struct sockaddr_storage* localAddr, SOCKADDR_LEN addrLen, int bufferSize, int qosType);
-static int testRecv(SOCKET s, char* buffer, int size, bool useSelect);
+static int testRecv(SOCKET s, char* buffer, int size, bool useSelect, struct sockaddr_storage* remoteAddr, SOCKADDR_LEN* addrLen);
 #define bindUdpSocket testBind
 #define recvUdpSocket testRecv
 #include "../src/VideoStream.c"
@@ -18,7 +18,7 @@ static int testRecv(SOCKET s, char* buffer, int size, bool useSelect);
 static int script[256], scriptLen, scriptPos, terminations, lastTermination;
 static uint64_t clockMs = 1000;
 uint64_t testGetMillis(void) { return clockMs; }
-static int testRecv(SOCKET s, char* buffer, int size, bool useSelect) {
+static int testRecv(SOCKET s, char* buffer, int size, bool useSelect, struct sockaddr_storage* remoteAddr, SOCKADDR_LEN* addrLen) {
     (void)s; (void)useSelect;
     // Each scripted receive happens 100 ms later, including successful garbage
     // reads. Wall time must advance even if recv() never reports a timeout.
