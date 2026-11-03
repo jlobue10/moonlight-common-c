@@ -3,7 +3,7 @@
 // audio packets only (RTP v2 header with a payload), not on bare 12-byte datagrams whose
 // second byte happens to be 97 (C27-03).
 #include "../src/Limelight-internal.h"
-static int testRecv(SOCKET s, char* buffer, int size, bool useSelect);
+static int testRecv(SOCKET s, char* buffer, int size, bool useSelect, struct sockaddr_storage* remoteAddr, SOCKADDR_LEN* addrLen);
 static int testAddPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACKET packet, uint16_t length);
 #define recvUdpSocket testRecv
 #define RtpaAddPacket testAddPacket
@@ -14,7 +14,7 @@ static int testAddPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACKET packet, uint16_t le
 
 static struct { int size; unsigned char header, payloadType; } script[512];
 static int scriptLen, scriptPos, adds, terminations, checks, failures;
-static int testRecv(SOCKET s, char* buffer, int size, bool useSelect) {
+static int testRecv(SOCKET s, char* buffer, int size, bool useSelect, struct sockaddr_storage* remoteAddr, SOCKADDR_LEN* addrLen) {
     (void)s; (void)useSelect;
     if (scriptPos >= scriptLen) return -1;  // ends the thread through its error path
     int n = script[scriptPos].size;
