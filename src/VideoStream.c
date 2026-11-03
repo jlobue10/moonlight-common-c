@@ -72,7 +72,7 @@ int initializeVideoStream(void) {
         return err;
     }
     RtpvInitializeQueue(&rtpQueue);
-    decryptionCtx = PltCreateCryptoContext();
+    decryptionCtx = PltCreateCryptoContext(0);
     if (decryptionCtx == NULL) {
         RtpvCleanupQueue(&rtpQueue);
         destroyVideoDepacketizer();
@@ -274,7 +274,8 @@ static void VideoReceiveThreadProc(void* context) {
                 continue;
             }
 
-            if (!PltDecryptMessage(decryptionCtx, ALGORITHM_AES_GCM, 0,
+            // Replay detection is handled by the check above and in the RtpFecQueue
+            if (!PltDecryptMessage(decryptionCtx, ALGORITHM_AES_GCM, CIPHER_FLAG_NO_REPLAY_CHECK, 0, 0,
                                    (unsigned char*)StreamConfig.remoteInputAesKey, sizeof(StreamConfig.remoteInputAesKey),
                                    encHeader->iv, sizeof(encHeader->iv),
                                    encHeader->tag, sizeof(encHeader->tag),
