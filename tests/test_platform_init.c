@@ -51,7 +51,7 @@ int main(void) {
     int outLen = sizeof(out);
     check(!PltEncryptMessage(NULL, ALGORITHM_AES_GCM, 0, key, sizeof(key), iv, sizeof(iv), tag, sizeof(tag), in, sizeof(in), out, &outLen),
           "encrypting with a NULL crypto context fails instead of crashing");
-    check(!PltDecryptMessage(NULL, ALGORITHM_AES_GCM, 0, key, sizeof(key), iv, sizeof(iv), tag, sizeof(tag), in, sizeof(in), out, &outLen),
+    check(!PltDecryptMessage(NULL, ALGORITHM_AES_GCM, 0, 0, 0, key, sizeof(key), iv, sizeof(iv), tag, sizeof(tag), in, sizeof(in), out, &outLen),
           "decrypting with a NULL crypto context fails instead of crashing");
     printf("%d checks, %d failures\n", checks, failures);
     return failures != 0;

@@ -26,6 +26,7 @@ static float absCurrentPosY;
 #define MAX_MOTION_EVENTS 2
 
 static uint8_t currentPenButtonState;
+static uint8_t currentPenToolType;
 
 #define CLAMP(val, min, max) (((val) < (min)) ? (min) : (((val) > (max)) ? (max) : (val)))
 
@@ -119,7 +120,7 @@ int initializeInputStream(void) {
         goto FailFreeList;
     }
 
-    cryptoContext = PltCreateCryptoContext();
+    cryptoContext = PltCreateCryptoContext(0);
     if (cryptoContext == NULL) {
         err = -1;
         goto FailMutex;
@@ -136,6 +137,7 @@ int initializeInputStream(void) {
     batchedScrollDelta = 0;
 
     currentPenButtonState = 0;
+    currentPenToolType = 0;
 
     // Start with the virtual mouse centered
     absCurrentPosX = absCurrentPosY = 0.5f;
@@ -179,6 +181,7 @@ void destroyInputStream(void) {
         entry = nextEntry;
     }
 
+    memset(currentQueuedControllerPacket, 0, sizeof(currentQueuedControllerPacket));
     PltDeleteMutex(&batchedInputMutex);
 }
 
@@ -316,7 +319,7 @@ static bool sendInputPacket(PPACKET_HOLDER holder, bool moreData) {
             }
 
             err = (SOCK_RET)sendInputPacketOnControlStream((unsigned char*) encryptedBuffer,
-                                                            (int)(encryptedSize + sizeof(encryptedLengthPrefix)),
+                                                            (unsigned int)(encryptedSize + sizeof(encryptedLengthPrefix)),
                                                             holder->channelId,
                                                             holder->enetPacketFlags,
                                                             moreData);
@@ -342,6 +345,36 @@ static void floatToNetfloat(float in, netfloat out) {
         out[2] = inb[1];
         out[3] = inb[0];
     }
+}
+
+// Returns the length in bytes of the UTF-8 code point at the given offset in the text,
+// or 0 if the byte at that offset does not start a valid UTF-8 code point.
+static uint32_t getUtf8CodePointLength(const char* utf8Text, uint32_t offset) {
+    uint8_t firstByte = (uint8_t)utf8Text[offset];
+    uint32_t codePointLength;
+
+    if ((firstByte & 0x80) == 0x00) {
+        // 1 byte code point
+        codePointLength = 1;
+    }
+    else if ((firstByte & 0xE0) == 0xC0) {
+        // 2 byte code point
+        codePointLength = 2;
+    }
+    else if ((firstByte & 0xF0) == 0xE0) {
+        // 3 byte code point
+        codePointLength = 3;
+    }
+    else if ((firstByte & 0xF8) == 0xF0) {
+        // 4 byte code point
+        codePointLength = 4;
+    }
+    else {
+        Limelog("Invalid unicode code point starting byte: %02x\n", firstByte);
+        return 0;
+    }
+
+    return codePointLength;
 }
 
 // Input thread proc
@@ -482,8 +515,9 @@ static void inputSendThreadProc(void* context) {
                     break;
                 }
 
-                // If the buttons or event type is different, we cannot batch
+                // If the buttons, tool type, or event type is different, we cannot batch
                 if (holder->packet.pen.penButtons != penBatchHolder->packet.pen.penButtons ||
+                    holder->packet.pen.toolType != penBatchHolder->packet.pen.toolType ||
                     holder->packet.pen.eventType != penBatchHolder->packet.pen.eventType) {
                     break;
                 }
@@ -544,63 +578,75 @@ static void inputSendThreadProc(void* context) {
             uint32_t totalLength = PAYLOAD_SIZE(holder) - sizeof(uint32_t);
             uint32_t i = 0;
 
-            // HACK: This is a workaround for the fact that GFE doesn't appear to synchronize keyboard
-            // and UTF-8 text events with each other. We need to make sure any previous keyboard events
-            // have been processed prior to sending these UTF-8 events to avoid interference between
-            // the two (especially with modifier keys).
-            flushInputOnControlStream();
-            // Bounded: a dead link keeps data "in transit" until the ENet peer timeout.
-            for (int waited = 0; waited < 100 && !stopping && !PltIsThreadInterrupted(&inputSendThread) && isControlDataInTransit(); waited++) {
-                PltSleepMs(10);
+            if (!IS_SUNSHINE()) {
+                // HACK: This is a workaround for the fact that GFE doesn't appear to synchronize keyboard
+                // and UTF-8 text events with each other. We need to make sure any previous keyboard events
+                // have been processed prior to sending these UTF-8 events to avoid interference between
+                // the two (especially with modifier keys).
+                flushInputOnControlStream();
+                // Bounded: a dead link keeps data "in transit" until the ENet peer timeout.
+                for (int waited = 0; waited < 100 && !stopping && !PltIsThreadInterrupted(&inputSendThread) && isControlDataInTransit(); waited++) {
+                    PltSleepMs(10);
+                }
+
+                // Finally, sleep an additional 50 ms to allow the events to be processed by Windows
+                PltSleepMs(50);
             }
 
-            // Finally, sleep an additional 50 ms to allow the events to be processed by Windows
-            PltSleepMs(50);
-
-            // We send each Unicode code point individually. This way we can always ensure they will
-            // never straddle a packet boundary (which will cause a parsing error on the host).
             while (i < totalLength && !PltIsThreadInterrupted(&inputSendThread)) {
-                uint32_t codePointLength;
-                uint8_t firstByte = (uint8_t)holder->packet.unicode.text[i];
-                if ((firstByte & 0x80) == 0x00) {
-                    // 1 byte code point
-                    codePointLength = 1;
-                }
-                else if ((firstByte & 0xE0) == 0xC0) {
-                    // 2 byte code point
-                    codePointLength = 2;
-                }
-                else if ((firstByte & 0xF0) == 0xE0) {
-                    // 3 byte code point
-                    codePointLength = 3;
-                }
-                else if ((firstByte & 0xF8) == 0xF0) {
-                    // 4 byte code point
-                    codePointLength = 4;
+                uint32_t chunkLength = 0;
+                uint32_t remaining = totalLength - i;
+
+                if (IS_SUNSHINE()) {
+                    // Sunshine accepts multiple code points per packet, so we pack as many as
+                    // fit within the NV_UNICODE_PACKET to send fewer packets overall. Code points
+                    // are never split across packet boundaries.
+                    while (chunkLength < remaining) {
+                        uint32_t codePointLength = getUtf8CodePointLength(holder->packet.unicode.text, i + chunkLength);
+                        if (codePointLength == 0 || chunkLength + codePointLength > remaining) {
+                            // Invalid, or a code point cut off by the end of the text
+                            break;
+                        }
+                        if (chunkLength + codePointLength > UTF8_TEXT_EVENT_MAX_COUNT) {
+                            break;
+                        }
+                        chunkLength += codePointLength;
+                    }
+
+                    // No code point fit, so stop sending
+                    if (chunkLength == 0) {
+                        Limelog("Truncated or invalid unicode code point at offset %u of %u\n", i, totalLength);
+                        break;
+                    }
                 }
                 else {
-                    Limelog("Invalid unicode code point starting byte: %02x\n", firstByte);
-                    break;
+                    // We send each Unicode code point individually. This way we can always ensure they will
+                    // never straddle a packet boundary (which will cause a parsing error on the host).
+                    uint32_t codePointLength = getUtf8CodePointLength(holder->packet.unicode.text, i);
+                    if (codePointLength == 0) {
+                        break;
+                    }
+                    chunkLength = codePointLength;
                 }
 
                 // A code point cut off by the end of the text would copy bytes past it
-                if (i + codePointLength > totalLength) {
+                if (chunkLength > remaining) {
                     Limelog("Truncated unicode code point at offset %u of %u\n", i, totalLength);
                     break;
                 }
 
-                // Use the original packet as a template and fixup to send one code point at a time
+                // Use the original packet as a template and fixup to send the chunk
                 splitPacket = *holder;
-                splitPacket.packet.unicode.header.size = BE32(sizeof(uint32_t) + codePointLength);
-                memcpy(splitPacket.packet.unicode.text, &holder->packet.unicode.text[i], codePointLength);
+                splitPacket.packet.unicode.header.size = BE32(sizeof(uint32_t) + chunkLength);
+                memcpy(splitPacket.packet.unicode.text, &holder->packet.unicode.text[i], chunkLength);
 
-                // Encrypt and send the split packet; the last code point flushes the batch
-                if (!sendInputPacket(&splitPacket, i + codePointLength < totalLength)) {
+                // Encrypt and send the chunk; the last one flushes the batch
+                if (!sendInputPacket(&splitPacket, i + chunkLength < totalLength)) {
                     freePacketHolder(holder);
                     return;
                 }
 
-                i += codePointLength;
+                i += chunkLength;
             }
 
             if (i > 0 && i < totalLength) {
@@ -983,7 +1029,7 @@ int LiSendUtf8TextEvent(const char *text, unsigned int length) {
         return -1;
     }
 
-    holder->channelId = CTRL_CHANNEL_UTF8;
+    holder->channelId = CTRL_CHANNEL_KEYBOARD;
     holder->enetPacketFlags = ENET_PACKET_FLAG_RELIABLE;
 
     // Magic + string length
@@ -1435,10 +1481,13 @@ int LiSendPenEvent(uint8_t eventType, uint8_t toolType, uint8_t penButtons,
     // Serialize the reliability decision with admission. A rejected edge must
     // remain pending for the next sample, including with concurrent producers.
     PltLockMutex(&batchedInputMutex);
-    holder->enetPacketFlags = (TOUCH_EVENT_IS_BATCHABLE(eventType) && penButtons == currentPenButtonState) ? 0 : ENET_PACKET_FLAG_RELIABLE;
+    holder->enetPacketFlags = (TOUCH_EVENT_IS_BATCHABLE(eventType) &&
+                               penButtons == currentPenButtonState &&
+                               toolType == currentPenToolType) ? 0 : ENET_PACKET_FLAG_RELIABLE;
     err = LbqOfferQueueItem(&packetQueue, holder, &holder->entry);
     if (err == LBQ_SUCCESS) {
         currentPenButtonState = penButtons;
+        currentPenToolType = toolType;
     }
     PltUnlockMutex(&batchedInputMutex);
     if (err != LBQ_SUCCESS) {

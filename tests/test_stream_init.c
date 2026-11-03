@@ -12,7 +12,7 @@ static int createMutex(PLT_MUTEX* mutex);
 static void destroyMutex(PLT_MUTEX* mutex);
 static int createEvent(PLT_EVENT* event);
 static void destroyEvent(PLT_EVENT* event);
-static PPLT_CRYPTO_CONTEXT createCrypto(void);
+static PPLT_CRYPTO_CONTEXT createCrypto(unsigned char replayWindowCount);
 static void destroyCrypto(PPLT_CRYPTO_CONTEXT ctx);
 static reed_solomon* createFec(int data, int parity);
 static void destroyFec(reed_solomon* rs);
@@ -112,9 +112,9 @@ static int createEvent(PLT_EVENT* event) {
 static void destroyEvent(PLT_EVENT* event) {
     if (removeLive(event)) PltCloseEvent(event);
 }
-static PPLT_CRYPTO_CONTEXT createCrypto(void) {
+static PPLT_CRYPTO_CONTEXT createCrypto(unsigned char replayWindowCount) {
     if (shouldFail("crypto")) return NULL;
-    PPLT_CRYPTO_CONTEXT ctx = PltCreateCryptoContext();
+    PPLT_CRYPTO_CONTEXT ctx = PltCreateCryptoContext(replayWindowCount);
     add(ctx);
     return ctx;
 }
